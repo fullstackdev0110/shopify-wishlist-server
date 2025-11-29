@@ -1,0 +1,93 @@
+const express = require('express');
+const fetch = require('node-fetch');
+const app = express();
+
+app.use(express.json());
+
+// Your Shopify credentials (from API credentials tab)
+const SHOPIFY_SHOP = 'YOUR-STORE.myshopify.com'; // e.g., tech-corner-9576.myshopify.com
+const SHOPIFY_ACCESS_TOKEN = 'YOUR_ACCESS_TOKEN'; // Copy from API credentials tab
+
+// Simple authentication (add your own secret key)
+const API_SECRET = 'your-secret-key-here'; // Change this to something secure
+
+// Wishlist save endpoint
+app.post('/api/wishlist', async (req, res) => {
+  try {
+    // Simple authentication check
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { customer_id, wishlist } = req.body;
+
+    if (!customer_id || !wishlist) {
+      return res.status(400).json({ error: 'Missing customer_id or wishlist' });
+    }
+
+    // Prepare GraphQL mutation to save to metafield
+    const metafieldValue = JSON.stringify(wishlist);
+    
+    const mutation = `
+      mutation {
+        metafieldsSet(metafields: [{
+          ownerId: "gid://shopify/Customer/${customer_id}"
+          namespace: "custom"
+          key: "wishlist"
+          type: "json"
+          value: ${JSON.stringify(metafieldValue)}
+        }]) {
+          metafields {
+            id
+            key
+            value
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `;
+
+    // Call Shopify Admin API
+    const response = await fetch(`https://${SHOPIFY_SHOP}/admin/api/2024-01/graphql.json`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+      },
+      body: JSON.stringify({ query: mutation })
+    });
+
+    const data = await response.json();
+
+    if (data.errors || (data.data?.metafieldsSet?.userErrors?.length > 0)) {
+      console.error('GraphQL errors:', data.errors || data.data?.metafieldsSet?.userErrors);
+      return res.status(500).json({ 
+        error: 'Failed to save wishlist',
+        details: data.errors || data.data?.metafieldsSet?.userErrors
+      });
+    }
+
+    res.json({ 
+      success: true, 
+      message: 'Wishlist saved successfully' 
+    });
+
+  } catch (error) {
+    console.error('Error saving wishlist:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Health check
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
