@@ -241,33 +241,89 @@ async function saveSubmissions() {
   await loadSubmissions();
 })();
 
-// Load pricing rules from file if it exists
+// Load pricing rules from MongoDB or file
 async function loadPricingRules() {
+  // Ensure MongoDB connection first
+  await ensureMongoConnection();
+  
+  if (db) {
+    try {
+      const doc = await db.collection('pricing').findOne({ type: 'rules' });
+      if (doc && doc.rules) {
+        pricingRules = doc.rules;
+        console.log('✅ Pricing rules loaded from MongoDB');
+        return;
+      }
+    } catch (error) {
+      console.error('Error loading pricing rules from MongoDB:', error);
+    }
+  }
+  
+  // Fallback to file (skip on Vercel)
+  if (process.env.VERCEL) {
+    console.log('No MongoDB connection, using default pricing rules (Vercel - no file storage)');
+    return;
+  }
+  
   try {
     const data = await fs.readFile(path.join(__dirname, 'pricing-rules.json'), 'utf8');
     pricingRules = JSON.parse(data);
-    console.log('Pricing rules loaded from file');
+    console.log('📁 Pricing rules loaded from file');
   } catch (error) {
     console.log('No pricing rules file found, using defaults');
   }
 }
 
-// Save pricing rules to file
+// Save pricing rules to MongoDB or file
 async function savePricingRules() {
+  // Ensure MongoDB connection
+  await ensureMongoConnection();
+  
+  if (db) {
+    try {
+      await db.collection('pricing').replaceOne(
+        { type: 'rules' },
+        { 
+          type: 'rules', 
+          rules: pricingRules, 
+          multipliers: conditionMultipliers,
+          updatedAt: new Date().toISOString() 
+        },
+        { upsert: true }
+      );
+      console.log('✅ Pricing rules saved to MongoDB');
+      return;
+    } catch (error) {
+      console.error('Error saving pricing rules to MongoDB:', error);
+    }
+  }
+  
+  // Fallback to file (skip on Vercel)
+  if (process.env.VERCEL) {
+    console.warn('⚠️ Vercel detected: Skipping file save (read-only filesystem). MongoDB required.');
+    return;
+  }
+  
   try {
     await fs.writeFile(
       path.join(__dirname, 'pricing-rules.json'),
       JSON.stringify(pricingRules, null, 2),
       'utf8'
     );
-    console.log('Pricing rules saved to file');
+    console.log('📁 Pricing rules saved to file');
   } catch (error) {
     console.error('Error saving pricing rules:', error);
   }
 }
 
-// Initialize pricing rules
-loadPricingRules();
+// Initialize pricing rules (on server start)
+(async () => {
+  try {
+    await loadPricingRules();
+  } catch (error) {
+    console.error('Pricing rules initialization error:', error);
+  }
+})();
 
 // Wishlist save endpoint
 app.post('/api/wishlist', async (req, res) => {
@@ -554,6 +610,9 @@ app.post('/api/pricing/rules', async (req, res) => {
     if (authHeader !== API_SECRET) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
+
+    // Ensure MongoDB connection
+    await ensureMongoConnection();
 
     const { pricingRules: newRules, conditionMultipliers: newMultipliers } = req.body;
 
@@ -1166,3 +1225,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
+
