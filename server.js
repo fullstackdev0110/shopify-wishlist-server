@@ -583,6 +583,53 @@ app.post('/api/pricing/calculate', async (req, res) => {
   }
 });
 
+// Get available brands/models/storage from pricing rules (for trade-in form)
+app.get('/api/pricing/available', async (req, res) => {
+  try {
+    // Ensure MongoDB connection and reload rules
+    await ensureMongoConnection();
+    await loadPricingRules();
+
+    const { deviceType } = req.query; // Optional: filter by device type
+
+    // Extract available brands, models, and storage from pricing rules
+    const availableData = {
+      brands: [],
+      modelsByBrand: {},
+      storageByBrandModel: {}
+    };
+
+    // Get all brands
+    availableData.brands = Object.keys(pricingRules);
+
+    // Get models for each brand
+    for (const brand of availableData.brands) {
+      if (pricingRules[brand]) {
+        availableData.modelsByBrand[brand] = Object.keys(pricingRules[brand]);
+        
+        // Get storage for each model
+        for (const model of availableData.modelsByBrand[brand]) {
+          if (pricingRules[brand][model]) {
+            availableData.storageByBrandModel[`${brand}_${model}`] = Object.keys(pricingRules[brand][model]);
+          }
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      ...availableData
+    });
+
+  } catch (error) {
+    console.error('Error fetching available pricing data:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Internal server error' 
+    });
+  }
+});
+
 // Get all pricing rules (admin)
 app.get('/api/pricing/rules', async (req, res) => {
   try {
@@ -705,8 +752,9 @@ app.post('/api/trade-in/submit', async (req, res) => {
       model,
       storage,
       condition,
-      finalPrice: parseFloat(finalPrice),
+      finalPrice: parseFloat(price),
       deviceType: deviceType || 'phone',
+      isCustomDevice: isCustomDevice || false,
       pageUrl: pageUrl || '',
       status: 'pending', // pending, accepted, rejected, completed
       createdAt: new Date().toISOString(),
