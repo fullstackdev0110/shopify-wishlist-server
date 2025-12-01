@@ -94,6 +94,45 @@ const conditionMultipliers = {
 let tradeInSubmissions = [];
 let submissionIdCounter = 1;
 
+// Load submissions from file if it exists
+async function loadSubmissions() {
+  try {
+    const filePath = path.join(__dirname, 'trade-in-submissions.json');
+    const data = await fs.readFile(filePath, 'utf8');
+    const parsed = JSON.parse(data);
+    tradeInSubmissions = parsed.submissions || [];
+    submissionIdCounter = parsed.counter || (tradeInSubmissions.length > 0 ? Math.max(...tradeInSubmissions.map(s => s.id)) + 1 : 1);
+    console.log(`Loaded ${tradeInSubmissions.length} submissions from file`);
+  } catch (error) {
+    console.log('No submissions file found, starting fresh');
+    tradeInSubmissions = [];
+    submissionIdCounter = 1;
+  }
+}
+
+// Save submissions to file
+async function saveSubmissions() {
+  try {
+    const filePath = path.join(__dirname, 'trade-in-submissions.json');
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({
+        submissions: tradeInSubmissions,
+        counter: submissionIdCounter,
+        lastUpdated: new Date().toISOString()
+      }, null, 2),
+      'utf8'
+    );
+    console.log(`Saved ${tradeInSubmissions.length} submissions to file`);
+  } catch (error) {
+    console.error('Error saving submissions:', error);
+    // Don't fail the request if save fails
+  }
+}
+
+// Initialize submissions on server start
+loadSubmissions();
+
 // Load pricing rules from file if it exists
 async function loadPricingRules() {
   try {
@@ -510,6 +549,9 @@ app.post('/api/trade-in/submit', async (req, res) => {
     };
 
     tradeInSubmissions.push(submission);
+    
+    // Save submissions to file
+    await saveSubmissions();
 
     // Send confirmation email to customer
     try {
@@ -657,6 +699,9 @@ app.post('/api/trade-in/:id/update-status', async (req, res) => {
     if (notes) {
       submission.adminNotes = notes;
     }
+    
+    // Save updated submission
+    await saveSubmissions();
 
     // Send email to customer about status change
     try {
@@ -853,6 +898,9 @@ app.post('/api/trade-in/:id/issue-credit', async (req, res) => {
     submission.giftCardId = giftCard.id;
     submission.status = 'completed';
     submission.updatedAt = new Date().toISOString();
+    
+    // Save updated submission
+    await saveSubmissions();
 
     // Send gift card email to customer
     try {
