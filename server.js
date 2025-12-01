@@ -1,6 +1,7 @@
 const express = require('express');
 const fetch = require('node-fetch');
 const nodemailer = require('nodemailer');
+const { MongoClient } = require('mongodb');
 const fs = require('fs').promises;
 const path = require('path');
 const app = express();
@@ -90,19 +91,61 @@ const conditionMultipliers = {
   "Faulty": 0.3
 };
 
-// Trade-in submissions storage (in-memory, should be persisted to database in production)
+// MongoDB connection
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://abrahambarrios970_db_user:c3CZOXj85ikzHYLM@cluster0.ueqwc8p.mongodb.net/?appName=Cluster0';
+const MONGODB_DB_NAME = process.env.MONGODB_DB_NAME || 'trade_in_system';
+let mongoClient = null;
+let db = null;
+
+// Initialize MongoDB connection
+async function initMongoDB() {
+  try {
+    mongoClient = new MongoClient(MONGODB_URI);
+    await mongoClient.connect();
+    db = mongoClient.db(MONGODB_DB_NAME);
+    console.log('✅ Connected to MongoDB');
+    
+    // Create indexes for better performance
+    await db.collection('submissions').createIndex({ id: 1 }, { unique: true });
+    await db.collection('submissions').createIndex({ status: 1 });
+    await db.collection('submissions').createIndex({ createdAt: -1 });
+    
+    return true;
+  } catch (error) {
+    console.error('❌ MongoDB connection error:', error);
+    console.warn('⚠️ Falling back to file storage');
+    return false;
+  }
+}
+
+// Trade-in submissions storage (in-memory fallback, MongoDB for production)
 let tradeInSubmissions = [];
 let submissionIdCounter = 1;
+let useMongoDB = false;
 
-// Load submissions from file if it exists
+// Load submissions from MongoDB or file
 async function loadSubmissions() {
+  if (db) {
+    try {
+      const submissions = await db.collection('submissions').find({}).sort({ id: 1 }).toArray();
+      tradeInSubmissions = submissions;
+      submissionIdCounter = submissions.length > 0 ? Math.max(...submissions.map(s => s.id)) + 1 : 1;
+      console.log(`✅ Loaded ${tradeInSubmissions.length} submissions from MongoDB`);
+      useMongoDB = true;
+      return;
+    } catch (error) {
+      console.error('Error loading from MongoDB:', error);
+    }
+  }
+  
+  // Fallback to file
   try {
     const filePath = path.join(__dirname, 'trade-in-submissions.json');
     const data = await fs.readFile(filePath, 'utf8');
     const parsed = JSON.parse(data);
     tradeInSubmissions = parsed.submissions || [];
     submissionIdCounter = parsed.counter || (tradeInSubmissions.length > 0 ? Math.max(...tradeInSubmissions.map(s => s.id)) + 1 : 1);
-    console.log(`Loaded ${tradeInSubmissions.length} submissions from file`);
+    console.log(`📁 Loaded ${tradeInSubmissions.length} submissions from file`);
   } catch (error) {
     console.log('No submissions file found, starting fresh');
     tradeInSubmissions = [];
@@ -110,8 +153,26 @@ async function loadSubmissions() {
   }
 }
 
-// Save submissions to file
+// Save submissions to MongoDB or file
 async function saveSubmissions() {
+  if (db) {
+    try {
+      // Save all submissions to MongoDB
+      for (const submission of tradeInSubmissions) {
+        await db.collection('submissions').replaceOne(
+          { id: submission.id },
+          submission,
+          { upsert: true }
+        );
+      }
+      console.log(`✅ Saved ${tradeInSubmissions.length} submissions to MongoDB`);
+      return;
+    } catch (error) {
+      console.error('Error saving to MongoDB:', error);
+    }
+  }
+  
+  // Fallback to file
   try {
     const filePath = path.join(__dirname, 'trade-in-submissions.json');
     await fs.writeFile(
@@ -123,15 +184,17 @@ async function saveSubmissions() {
       }, null, 2),
       'utf8'
     );
-    console.log(`Saved ${tradeInSubmissions.length} submissions to file`);
+    console.log(`📁 Saved ${tradeInSubmissions.length} submissions to file`);
   } catch (error) {
     console.error('Error saving submissions:', error);
-    // Don't fail the request if save fails
   }
 }
 
-// Initialize submissions on server start
-loadSubmissions();
+// Initialize MongoDB and load submissions
+(async () => {
+  await initMongoDB();
+  await loadSubmissions();
+})();
 
 // Load pricing rules from file if it exists
 async function loadPricingRules() {
@@ -550,7 +613,21 @@ app.post('/api/trade-in/submit', async (req, res) => {
 
     tradeInSubmissions.push(submission);
     
-    // Save submissions to file
+    // Save to MongoDB if available
+    if (db) {
+      try {
+        await db.collection('submissions').replaceOne(
+          { id: submission.id },
+          submission,
+          { upsert: true }
+        );
+        console.log(`✅ Saved submission #${submission.id} to MongoDB`);
+      } catch (error) {
+        console.error('Error saving to MongoDB:', error);
+      }
+    }
+    
+    // Also save to file as fallback
     await saveSubmissions();
 
     // Send confirmation email to customer
@@ -620,23 +697,47 @@ app.get('/api/trade-in/list', async (req, res) => {
 
     const { status, limit = 100, offset = 0 } = req.query;
 
-    let submissions = [...tradeInSubmissions];
+    let submissions = [];
+    let total = 0;
 
-    // Filter by status if provided
+    // Try MongoDB first
+    if (db) {
+      try {
+        const query = status ? { status: status } : {};
+        total = await db.collection('submissions').countDocuments(query);
+        submissions = await db.collection('submissions')
+          .find(query)
+          .sort({ createdAt: -1 })
+          .skip(parseInt(offset))
+          .limit(parseInt(limit))
+          .toArray();
+        
+        res.json({
+          success: true,
+          submissions: submissions,
+          total: total,
+          limit: parseInt(limit),
+          offset: parseInt(offset)
+        });
+        return;
+      } catch (error) {
+        console.error('Error fetching from MongoDB:', error);
+      }
+    }
+
+    // Fallback to in-memory
+    submissions = [...tradeInSubmissions];
     if (status) {
       submissions = submissions.filter(s => s.status === status);
     }
-
-    // Sort by newest first
     submissions.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-
-    // Pagination
+    total = submissions.length;
     const paginated = submissions.slice(parseInt(offset), parseInt(offset) + parseInt(limit));
 
     res.json({
       success: true,
       submissions: paginated,
-      total: submissions.length,
+      total: total,
       limit: parseInt(limit),
       offset: parseInt(offset)
     });
@@ -688,20 +789,52 @@ app.post('/api/trade-in/:id/update-status', async (req, res) => {
       return res.status(400).json({ error: 'Invalid status' });
     }
 
-    const submission = tradeInSubmissions.find(s => s.id === id);
-    if (!submission) {
-      return res.status(404).json({ error: 'Submission not found' });
-    }
+    let submission = null;
 
-    const oldStatus = submission.status;
-    submission.status = status;
-    submission.updatedAt = new Date().toISOString();
-    if (notes) {
-      submission.adminNotes = notes;
+    // Try MongoDB first
+    if (db) {
+      try {
+        submission = await db.collection('submissions').findOne({ id: id });
+        if (!submission) {
+          return res.status(404).json({ error: 'Submission not found' });
+        }
+        
+        submission.status = status;
+        submission.updatedAt = new Date().toISOString();
+        if (notes) {
+          submission.adminNotes = notes;
+        }
+        
+        await db.collection('submissions').replaceOne({ id: id }, submission);
+        
+        // Also update in-memory for consistency
+        const index = tradeInSubmissions.findIndex(s => s.id === id);
+        if (index !== -1) {
+          tradeInSubmissions[index] = submission;
+        } else {
+          tradeInSubmissions.push(submission);
+        }
+      } catch (error) {
+        console.error('Error updating in MongoDB:', error);
+        // Fall through to in-memory update
+      }
     }
     
-    // Save updated submission
-    await saveSubmissions();
+    // Fallback to in-memory
+    if (!submission) {
+      submission = tradeInSubmissions.find(s => s.id === id);
+      if (!submission) {
+        return res.status(404).json({ error: 'Submission not found' });
+      }
+      
+      submission.status = status;
+      submission.updatedAt = new Date().toISOString();
+      if (notes) {
+        submission.adminNotes = notes;
+      }
+      
+      await saveSubmissions();
+    }
 
     // Send email to customer about status change
     try {
@@ -899,7 +1032,24 @@ app.post('/api/trade-in/:id/issue-credit', async (req, res) => {
     submission.status = 'completed';
     submission.updatedAt = new Date().toISOString();
     
-    // Save updated submission
+    // Save to MongoDB if available
+    if (db) {
+      try {
+        await db.collection('submissions').replaceOne({ id: submission.id }, submission);
+      } catch (error) {
+        console.error('Error saving to MongoDB:', error);
+      }
+    }
+    
+    // Also update in-memory
+    const index = tradeInSubmissions.findIndex(s => s.id === submission.id);
+    if (index !== -1) {
+      tradeInSubmissions[index] = submission;
+    } else {
+      tradeInSubmissions.push(submission);
+    }
+    
+    // Save to file as fallback
     await saveSubmissions();
 
     // Send gift card email to customer
