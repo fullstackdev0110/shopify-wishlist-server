@@ -1209,105 +1209,52 @@ app.post('/api/trade-in/:id/issue-credit', async (req, res) => {
     // Convert price to string with 2 decimal places for MoneyV2 format
     const amount = parseFloat(submission.finalPrice).toFixed(2);
     
-    // Shopify GraphQL API: initialValue should be a Decimal (number), not MoneyV2
-    // The currency is determined by the shop's currency settings
-    // Note: 'code' field might not be available in GraphQL response, we'll use the gift card ID to fetch it
-    const mutation = `
-      mutation {
-        giftCardCreate(input: {
-          initialValue: ${amount}
-        }) {
-          giftCard {
-            id
-            balance {
-              amount
-              currencyCode
-            }
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    `;
-    
-    console.log('Creating gift card with mutation:', mutation);
-    console.log('Gift card details:', { code: giftCardCode, amount: amount, submissionId: submission.id });
+    // Use REST API instead of GraphQL to avoid permission scope issues
+    // REST API: POST /admin/api/2024-01/gift_cards.json
+    console.log('Creating gift card via REST API:', { code: giftCardCode, amount: amount, submissionId: submission.id });
 
-    const response = await fetch(`https://${SHOPIFY_SHOP}/admin/api/2024-01/graphql.json`, {
+    const restPayload = {
+      gift_card: {
+        initial_value: parseFloat(amount),
+        code: giftCardCode,
+        note: `Trade-in #${submission.id} - ${submission.brand} ${submission.model}`
+      }
+    };
+
+    const response = await fetch(`https://${SHOPIFY_SHOP}/admin/api/2024-01/gift_cards.json`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
       },
-      body: JSON.stringify({ query: mutation })
+      body: JSON.stringify(restPayload)
     });
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error('Shopify API response error:', response.status, errorText);
-      throw new Error(`Shopify API error: ${response.status} - ${errorText}`);
+      console.error('Shopify REST API response error:', response.status, errorText);
+      
+      // If it's a permissions error, provide helpful message
+      if (response.status === 403 || response.status === 401) {
+        return res.status(403).json({ 
+          success: false,
+          error: 'Permission denied: Your Shopify access token needs "write_gift_cards" scope. Please update your Shopify app permissions in Settings > Apps and sales channels > Develop apps.',
+          details: errorText
+        });
+      }
+      
+      return res.status(500).json({ 
+        success: false,
+        error: `Shopify API error: ${response.status}`,
+        details: errorText
+      });
     }
 
     const data = await response.json();
     console.log('Shopify gift card creation response:', JSON.stringify(data, null, 2));
     
-    // If customer was found, try to assign the gift card to them
-    // This ensures it appears in their account
-    if (customerId && data.data?.giftCardCreate?.giftCard) {
-      try {
-        const assignMutation = `
-          mutation {
-            giftCardAssign(giftCardId: "${data.data.giftCardCreate.giftCard.id}", customerId: "${customerId}") {
-              giftCard {
-                id
-                customer {
-                  id
-                  email
-                }
-              }
-              userErrors {
-                field
-                message
-              }
-            }
-          }
-        `;
-
-        const assignResponse = await fetch(`https://${SHOPIFY_SHOP}/admin/api/2024-01/graphql.json`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
-          },
-          body: JSON.stringify({ query: assignMutation })
-        });
-
-        const assignData = await assignResponse.json();
-        if (assignData.data?.giftCardAssign?.giftCard) {
-          console.log(`Gift card assigned to customer ${customerId}`);
-        } else if (assignData.data?.giftCardAssign?.userErrors?.length > 0) {
-          console.warn('Could not assign gift card to customer:', assignData.data.giftCardAssign.userErrors);
-        }
-      } catch (assignError) {
-        console.warn('Error assigning gift card to customer (gift card still created):', assignError);
-        // Gift card is still created, just not assigned - customer can still use the code
-      }
-    }
-
-    if (data.errors || (data.data?.giftCardCreate?.userErrors?.length > 0)) {
-      const errors = data.errors || data.data?.giftCardCreate?.userErrors;
-      console.error('GraphQL errors:', errors);
-      return res.status(500).json({ 
-        success: false,
-        error: 'Failed to create gift card',
-        details: errors,
-        message: errors[0]?.message || 'Unknown error creating gift card'
-      });
-    }
-    
-    if (!data.data?.giftCardCreate?.giftCard) {
+    // REST API returns gift_card object directly
+    if (!data.gift_card) {
       console.error('No gift card returned from Shopify:', data);
       return res.status(500).json({ 
         success: false,
@@ -1316,37 +1263,45 @@ app.post('/api/trade-in/:id/issue-credit', async (req, res) => {
       });
     }
 
-    const giftCard = data.data.giftCardCreate.giftCard;
+    const giftCard = data.gift_card;
+    const finalGiftCardCode = giftCard.code || giftCardCode;
     
-    // Shopify GraphQL doesn't return 'code' field in the response
-    // We need to fetch the gift card details using REST API or use the ID
-    // For now, we'll use our custom code format and try to fetch the actual code
-    let finalGiftCardCode = giftCardCode;
-    
-    // Try to fetch the gift card code using REST API
-    try {
-      const restResponse = await fetch(`https://${SHOPIFY_SHOP}/admin/api/2024-01/gift_cards/${giftCard.id.split('/').pop()}.json`, {
-        method: 'GET',
-        headers: {
-          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+    // If customer was found, try to assign the gift card to them via REST API
+    if (customerId) {
+      try {
+        // Extract customer ID number from GID
+        const customerIdNum = customerId.split('/').pop();
+        
+        // Update gift card to assign to customer
+        const updatePayload = {
+          gift_card: {
+            customer_id: parseInt(customerIdNum)
+          }
+        };
+        
+        const updateResponse = await fetch(`https://${SHOPIFY_SHOP}/admin/api/2024-01/gift_cards/${giftCard.id}.json`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          },
+          body: JSON.stringify(updatePayload)
+        });
+        
+        if (updateResponse.ok) {
+          console.log(`Gift card assigned to customer ${customerId}`);
+        } else {
+          console.warn('Could not assign gift card to customer (gift card still created)');
         }
-      });
-      
-      if (restResponse.ok) {
-        const restData = await restResponse.json();
-        if (restData.gift_card?.code) {
-          finalGiftCardCode = restData.gift_card.code;
-          console.log(`Fetched gift card code from REST API: ${finalGiftCardCode}`);
-        }
+      } catch (assignError) {
+        console.warn('Error assigning gift card to customer (gift card still created):', assignError);
+        // Gift card is still created, just not assigned - customer can still use the code
       }
-    } catch (restError) {
-      console.warn('Could not fetch gift card code from REST API, using custom code:', restError);
-      // Continue with custom code
     }
     
     // Update submission
     submission.giftCardCode = finalGiftCardCode;
-    submission.giftCardId = giftCard.id;
+    submission.giftCardId = giftCard.id.toString();
     submission.status = 'completed';
     submission.updatedAt = new Date().toISOString();
     
