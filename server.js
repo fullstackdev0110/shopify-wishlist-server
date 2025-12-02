@@ -1211,6 +1211,7 @@ app.post('/api/trade-in/:id/issue-credit', async (req, res) => {
     
     // Shopify GraphQL API: initialValue should be a Decimal (number), not MoneyV2
     // The currency is determined by the shop's currency settings
+    // Note: 'code' field might not be available in GraphQL response, we'll use the gift card ID to fetch it
     const mutation = `
       mutation {
         giftCardCreate(input: {
@@ -1218,7 +1219,6 @@ app.post('/api/trade-in/:id/issue-credit', async (req, res) => {
         }) {
           giftCard {
             id
-            code
             balance {
               amount
               currencyCode
@@ -1318,9 +1318,31 @@ app.post('/api/trade-in/:id/issue-credit', async (req, res) => {
 
     const giftCard = data.data.giftCardCreate.giftCard;
     
-    // Shopify generates a code automatically if we don't provide one
-    // Use the generated code, or fallback to our custom format
-    const finalGiftCardCode = giftCard.code || giftCardCode;
+    // Shopify GraphQL doesn't return 'code' field in the response
+    // We need to fetch the gift card details using REST API or use the ID
+    // For now, we'll use our custom code format and try to fetch the actual code
+    let finalGiftCardCode = giftCardCode;
+    
+    // Try to fetch the gift card code using REST API
+    try {
+      const restResponse = await fetch(`https://${SHOPIFY_SHOP}/admin/api/2024-01/gift_cards/${giftCard.id.split('/').pop()}.json`, {
+        method: 'GET',
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+        }
+      });
+      
+      if (restResponse.ok) {
+        const restData = await restResponse.json();
+        if (restData.gift_card?.code) {
+          finalGiftCardCode = restData.gift_card.code;
+          console.log(`Fetched gift card code from REST API: ${finalGiftCardCode}`);
+        }
+      }
+    } catch (restError) {
+      console.warn('Could not fetch gift card code from REST API, using custom code:', restError);
+      // Continue with custom code
+    }
     
     // Update submission
     submission.giftCardCode = finalGiftCardCode;
