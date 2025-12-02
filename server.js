@@ -85,7 +85,6 @@ let pricingRules = {
 // Condition multipliers
 const conditionMultipliers = {
   "Excellent": 1.0,
-  "Like New": 0.9,
   "Good": 0.8,
   "Fair": 0.6,
   "Faulty": 0.3
