@@ -1224,7 +1224,66 @@ app.post('/api/trade-in/:id/issue-credit', async (req, res) => {
       return code;
     }
     
-    const giftCardCode = generateSecureGiftCardCode();
+    // Check if gift card code already exists (prevent duplicates)
+    async function isGiftCardCodeUnique(code) {
+      // Check in our submissions database
+      let existingSubmission = null;
+      if (db) {
+        try {
+          existingSubmission = await db.collection('submissions').findOne({ giftCardCode: code });
+        } catch (error) {
+          console.warn('Error checking MongoDB for duplicate code:', error);
+        }
+      }
+      
+      // Also check in-memory submissions
+      if (!existingSubmission) {
+        existingSubmission = tradeInSubmissions.find(s => s.giftCardCode === code);
+      }
+      
+      // Check with Shopify API to see if code exists
+      try {
+        const checkResponse = await fetch(`https://${SHOPIFY_SHOP}/admin/api/2024-01/gift_cards.json?code=${encodeURIComponent(code)}`, {
+          method: 'GET',
+          headers: {
+            'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          }
+        });
+        
+        if (checkResponse.ok) {
+          const checkData = await checkResponse.json();
+          if (checkData.gift_cards && checkData.gift_cards.length > 0) {
+            console.log(`Code ${code} already exists in Shopify`);
+            return false; // Code exists
+          }
+        }
+      } catch (error) {
+        console.warn('Error checking Shopify for duplicate code:', error);
+        // If we can't check Shopify, assume it's unique (Shopify will reject if duplicate)
+      }
+      
+      return !existingSubmission; // Return true if no existing submission found
+    }
+    
+    // Generate unique gift card code with duplicate checking
+    let giftCardCode;
+    let attempts = 0;
+    const maxAttempts = 10; // Prevent infinite loop
+    
+    do {
+      giftCardCode = generateSecureGiftCardCode();
+      attempts++;
+      
+      if (attempts >= maxAttempts) {
+        // Fallback: use submission ID + random suffix if we can't generate unique code
+        const randomSuffix = Math.random().toString(36).substring(2, 6).toUpperCase();
+        giftCardCode = `TRADE-${submission.id.toString().padStart(6, '0')}-${randomSuffix}`;
+        console.warn(`Could not generate unique code after ${maxAttempts} attempts, using fallback: ${giftCardCode}`);
+        break;
+      }
+    } while (!(await isGiftCardCodeUnique(giftCardCode)));
+    
+    console.log(`Generated unique gift card code: ${giftCardCode} (attempts: ${attempts})`);
     
     // Convert price to string with 2 decimal places for MoneyV2 format
     const amount = parseFloat(submission.finalPrice).toFixed(2);
