@@ -291,7 +291,7 @@ async function savePricingRules() {
   
   if (db) {
     try {
-      await db.collection('pricing').replaceOne(
+      const result = await db.collection('pricing').replaceOne(
         { type: 'rules' },
         { 
           type: 'rules', 
@@ -301,28 +301,38 @@ async function savePricingRules() {
         },
         { upsert: true }
       );
-      console.log('✅ Pricing rules saved to MongoDB');
+      console.log('✅ Pricing rules saved to MongoDB', {
+        matched: result.matchedCount,
+        modified: result.modifiedCount,
+        upserted: result.upsertedCount,
+        brands: Object.keys(pricingRules).length
+      });
       return;
     } catch (error) {
       console.error('Error saving pricing rules to MongoDB:', error);
+      throw error; // Re-throw to handle in caller
     }
   }
   
   // Fallback to file (skip on Vercel)
   if (process.env.VERCEL) {
     console.warn('⚠️ Vercel detected: Skipping file save (read-only filesystem). MongoDB required.');
+    if (!db) {
+      throw new Error('MongoDB connection required on Vercel');
+    }
     return;
   }
   
   try {
     await fs.writeFile(
       path.join(__dirname, 'pricing-rules.json'),
-      JSON.stringify(pricingRules, null, 2),
+      JSON.stringify({ rules: pricingRules, multipliers: conditionMultipliers }, null, 2),
       'utf8'
     );
     console.log('📁 Pricing rules saved to file');
   } catch (error) {
     console.error('Error saving pricing rules:', error);
+    throw error;
   }
 }
 
@@ -688,10 +698,26 @@ app.post('/api/pricing/rules', async (req, res) => {
       console.log('Updated conditionMultipliers:', Object.keys(conditionMultipliers).length, 'conditions');
     }
 
-    await savePricingRules();
+    try {
+      await savePricingRules();
+      console.log('Pricing rules saved successfully');
+    } catch (saveError) {
+      console.error('Error during save:', saveError);
+      return res.status(500).json({ 
+        success: false,
+        error: 'Failed to save pricing rules',
+        details: saveError.message 
+      });
+    }
 
-    // Reload to verify save
-    await loadPricingRules();
+    // Reload to verify save (but don't fail if reload fails)
+    try {
+      await loadPricingRules();
+      console.log('Pricing rules reloaded successfully');
+    } catch (reloadError) {
+      console.warn('Warning: Could not reload pricing rules after save:', reloadError);
+      // Continue anyway - the save was successful
+    }
 
     res.json({
       success: true,
