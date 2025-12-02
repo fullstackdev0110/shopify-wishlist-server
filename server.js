@@ -1209,16 +1209,12 @@ app.post('/api/trade-in/:id/issue-credit', async (req, res) => {
     // Convert price to string with 2 decimal places for MoneyV2 format
     const amount = parseFloat(submission.finalPrice).toFixed(2);
     
-    // Shopify gift card creation - code is optional, Shopify will generate one if not provided
-    // But we can't set a custom code via GraphQL API in some versions
-    // Let's try without code first, then we can set it via REST API if needed
+    // Shopify GraphQL API: initialValue should be a Decimal (number), not MoneyV2
+    // The currency is determined by the shop's currency settings
     const mutation = `
       mutation {
         giftCardCreate(input: {
-          initialValue: {
-            amount: "${amount}"
-            currencyCode: GBP
-          }
+          initialValue: ${amount}
         }) {
           giftCard {
             id
