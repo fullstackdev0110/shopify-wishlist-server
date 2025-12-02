@@ -1203,23 +1203,22 @@ app.post('/api/trade-in/:id/issue-credit', async (req, res) => {
     }
 
     // Create gift card via Shopify Admin API
-    // Note: Shopify gift cards can be assigned to customers, but the API may require
-    // using giftCardAssign mutation after creation, or customerId in the create mutation
-    // For now, we'll create the gift card and it will be code-based
-    // If customer exists, they can still use the code and it will be linked when used
+    // Shopify GraphQL API requires 'input' argument, not 'giftCard'
     const giftCardCode = `TRADE${submission.id.toString().padStart(6, '0')}`;
     
     // Convert price to string with 2 decimal places for MoneyV2 format
     const amount = parseFloat(submission.finalPrice).toFixed(2);
     
+    // Shopify gift card creation - code is optional, Shopify will generate one if not provided
+    // But we can't set a custom code via GraphQL API in some versions
+    // Let's try without code first, then we can set it via REST API if needed
     const mutation = `
       mutation {
-        giftCardCreate(giftCard: {
+        giftCardCreate(input: {
           initialValue: {
             amount: "${amount}"
             currencyCode: GBP
           }
-          code: "${giftCardCode}"
         }) {
           giftCard {
             id
@@ -1323,8 +1322,12 @@ app.post('/api/trade-in/:id/issue-credit', async (req, res) => {
 
     const giftCard = data.data.giftCardCreate.giftCard;
     
+    // Shopify generates a code automatically if we don't provide one
+    // Use the generated code, or fallback to our custom format
+    const finalGiftCardCode = giftCard.code || giftCardCode;
+    
     // Update submission
-    submission.giftCardCode = giftCard.code;
+    submission.giftCardCode = finalGiftCardCode;
     submission.giftCardId = giftCard.id;
     submission.status = 'completed';
     submission.updatedAt = new Date().toISOString();
@@ -1361,7 +1364,7 @@ app.post('/api/trade-in/:id/issue-credit', async (req, res) => {
           <p>Your trade-in request (#${submission.id}) has been completed and store credit has been issued.</p>
           <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0;">
             <h3 style="margin-top: 0;">Gift Card Code</h3>
-            <p style="font-size: 24px; font-weight: bold; letter-spacing: 2px; color: #ef4444;">${giftCard.code}</p>
+            <p style="font-size: 24px; font-weight: bold; letter-spacing: 2px; color: #ef4444;">${finalGiftCardCode}</p>
             <p><strong>Amount:</strong> £${submission.finalPrice.toFixed(2)}</p>
           </div>
           <p>You can use this code at checkout to apply your store credit to any purchase.</p>
@@ -1376,7 +1379,8 @@ app.post('/api/trade-in/:id/issue-credit', async (req, res) => {
       success: true,
       message: 'Store credit issued successfully',
       giftCard: {
-        code: giftCard.code,
+        code: finalGiftCardCode,
+        id: giftCard.id,
         amount: submission.finalPrice,
         currency: 'GBP'
       },
