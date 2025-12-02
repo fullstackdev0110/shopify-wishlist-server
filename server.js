@@ -1123,21 +1123,48 @@ app.post('/api/trade-in/:id/issue-credit', async (req, res) => {
     }
 
     const id = parseInt(req.params.id);
-    const submission = tradeInSubmissions.find(s => s.id === id);
+    let submission = null;
+
+    // Ensure MongoDB connection
+    await ensureMongoConnection();
+
+    // Try MongoDB first
+    if (db) {
+      try {
+        submission = await db.collection('submissions').findOne({ id: id });
+        if (submission) {
+          console.log(`Found submission #${id} in MongoDB for credit issuance`);
+        }
+      } catch (error) {
+        console.error('Error fetching from MongoDB:', error);
+      }
+    }
+    
+    // Fallback to in-memory
+    if (!submission) {
+      submission = tradeInSubmissions.find(s => s.id === id);
+    }
 
     if (!submission) {
-      return res.status(404).json({ error: 'Submission not found' });
+      return res.status(404).json({ 
+        success: false,
+        error: 'Submission not found' 
+      });
     }
 
     if (submission.status !== 'accepted') {
       return res.status(400).json({ 
-        error: 'Can only issue credit for accepted submissions' 
+        success: false,
+        error: 'Can only issue credit for accepted submissions',
+        currentStatus: submission.status
       });
     }
 
     if (submission.giftCardCode) {
       return res.status(400).json({ 
-        error: 'Credit already issued for this submission' 
+        success: false,
+        error: 'Credit already issued for this submission',
+        giftCardCode: submission.giftCardCode
       });
     }
 
@@ -1259,10 +1286,22 @@ app.post('/api/trade-in/:id/issue-credit', async (req, res) => {
     }
 
     if (data.errors || (data.data?.giftCardCreate?.userErrors?.length > 0)) {
-      console.error('GraphQL errors:', data.errors || data.data?.giftCardCreate?.userErrors);
+      const errors = data.errors || data.data?.giftCardCreate?.userErrors;
+      console.error('GraphQL errors:', errors);
       return res.status(500).json({ 
+        success: false,
         error: 'Failed to create gift card',
-        details: data.errors || data.data?.giftCardCreate?.userErrors
+        details: errors,
+        message: errors[0]?.message || 'Unknown error creating gift card'
+      });
+    }
+    
+    if (!data.data?.giftCardCreate?.giftCard) {
+      console.error('No gift card returned from Shopify:', data);
+      return res.status(500).json({ 
+        success: false,
+        error: 'Failed to create gift card - no gift card returned',
+        details: data
       });
     }
 
@@ -1330,7 +1369,12 @@ app.post('/api/trade-in/:id/issue-credit', async (req, res) => {
 
   } catch (error) {
     console.error('Error issuing credit:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ 
+      success: false,
+      error: 'Internal server error',
+      message: error.message,
+      details: error.stack
+    });
   }
 });
 
