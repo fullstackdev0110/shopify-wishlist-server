@@ -915,6 +915,7 @@ app.post('/api/trade-in/submit', async (req, res) => {
 
     res.json({
       success: true,
+      id: submission.id,
       submissionId: submission.id,
       message: 'Trade-in request submitted successfully'
     });
