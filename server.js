@@ -731,14 +731,38 @@ app.post('/api/trade-in/submit', async (req, res) => {
       condition,
       finalPrice,
       deviceType,
-      pageUrl
+      pageUrl,
+      isCustomDevice,
+      paymentMethod,
+      paymentDetails
     } = req.body;
 
-    if (!name || !email || !brand || !model || !storage || !condition || !finalPrice) {
+    if (!name || !email || !brand || !model || !condition) {
       return res.status(400).json({ 
         error: 'Missing required fields' 
       });
     }
+
+    // Validate payment details based on payment method
+    if (paymentMethod === 'bank_transfer') {
+      if (!paymentDetails?.accountNumber || !paymentDetails?.sortCode || !paymentDetails?.accountName) {
+        return res.status(400).json({ 
+          error: 'Bank account details are required for bank transfer' 
+        });
+      }
+    } else if (paymentMethod === 'paypal') {
+      if (!paymentDetails?.paypalEmail) {
+        return res.status(400).json({ 
+          error: 'PayPal email is required for PayPal payment' 
+        });
+      }
+    }
+
+    // For custom devices, finalPrice can be 0
+    const price = isCustomDevice ? 0 : (finalPrice || 0);
+    
+    // Default to store_credit if not specified
+    const selectedPaymentMethod = paymentMethod || 'store_credit';
 
     // Create submission
     const submission = {
@@ -750,17 +774,22 @@ app.post('/api/trade-in/submit', async (req, res) => {
       notes: notes || '',
       brand,
       model,
-      storage,
+      storage: storage || 'Unknown',
       condition,
       finalPrice: parseFloat(price),
       deviceType: deviceType || 'phone',
       isCustomDevice: isCustomDevice || false,
+      paymentMethod: selectedPaymentMethod,
+      paymentDetails: paymentDetails || {},
       pageUrl: pageUrl || '',
       status: 'pending', // pending, accepted, rejected, completed
+      paymentStatus: 'pending', // pending, processing, completed, failed
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       giftCardCode: null,
-      giftCardId: null
+      giftCardId: null,
+      paymentReference: null,
+      paymentDate: null
     };
 
     tradeInSubmissions.push(submission);
@@ -1248,6 +1277,213 @@ app.post('/api/trade-in/:id/issue-credit', async (req, res) => {
 
   } catch (error) {
     console.error('Error issuing credit:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Issue cash payment (Bank Transfer or PayPal)
+app.post('/api/trade-in/:id/issue-cash-payment', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const id = parseInt(req.params.id);
+    const { paymentMethod } = req.body; // 'bank_transfer' or 'paypal'
+
+    if (!['bank_transfer', 'paypal'].includes(paymentMethod)) {
+      return res.status(400).json({ error: 'Invalid payment method' });
+    }
+
+    let submission = null;
+
+    // Try MongoDB first
+    if (db) {
+      try {
+        submission = await db.collection('submissions').findOne({ id: id });
+      } catch (error) {
+        console.error('Error fetching from MongoDB:', error);
+      }
+    }
+    
+    // Fallback to in-memory
+    if (!submission) {
+      submission = tradeInSubmissions.find(s => s.id === id);
+    }
+
+    if (!submission) {
+      return res.status(404).json({ error: 'Submission not found' });
+    }
+
+    if (submission.status !== 'accepted') {
+      return res.status(400).json({ 
+        error: 'Can only issue payment for accepted submissions' 
+      });
+    }
+
+    if (submission.paymentReference) {
+      return res.status(400).json({ 
+        error: 'Payment already issued for this submission' 
+      });
+    }
+
+    // Generate payment reference
+    const paymentReference = `${paymentMethod.toUpperCase()}-${submission.id.toString().padStart(6, '0')}-${Date.now().toString().slice(-6)}`;
+    
+    // Process payment based on method
+    let paymentResult = null;
+    
+    if (paymentMethod === 'paypal') {
+      // PayPal payment processing
+      const paypalEmail = submission.paymentDetails?.paypalEmail;
+      
+      if (!paypalEmail) {
+        return res.status(400).json({ 
+          error: 'PayPal email not found in submission' 
+        });
+      }
+
+      // TODO: Integrate with PayPal API for automated payments
+      // For now, this creates a payment record and sends email
+      // You can integrate PayPal Payouts API here for automated payments
+      
+      paymentResult = {
+        method: 'paypal',
+        email: paypalEmail,
+        amount: submission.finalPrice,
+        status: 'processing', // Will be 'completed' when PayPal confirms
+        reference: paymentReference
+      };
+      
+      console.log(`PayPal payment initiated: ${paypalEmail}, Amount: £${submission.finalPrice}, Reference: ${paymentReference}`);
+      
+      // Note: To enable automated PayPal payments, you need to:
+      // 1. Set up PayPal Payouts API
+      // 2. Add PAYPAL_CLIENT_ID and PAYPAL_SECRET to environment variables
+      // 3. Implement PayPal Payout API call here
+      
+    } else if (paymentMethod === 'bank_transfer') {
+      // Bank transfer processing
+      const bankDetails = submission.paymentDetails;
+      
+      if (!bankDetails?.accountNumber || !bankDetails?.sortCode || !bankDetails?.accountName) {
+        return res.status(400).json({ 
+          error: 'Bank account details not found in submission' 
+        });
+      }
+
+      // TODO: Integrate with bank transfer API (e.g., Stripe Connect, Open Banking)
+      // For now, this creates a payment record and sends email
+      // You can integrate bank transfer APIs here for automated payments
+      
+      paymentResult = {
+        method: 'bank_transfer',
+        accountNumber: bankDetails.accountNumber,
+        sortCode: bankDetails.sortCode,
+        accountName: bankDetails.accountName,
+        amount: submission.finalPrice,
+        status: 'processing', // Will be 'completed' when transfer is confirmed
+        reference: paymentReference
+      };
+      
+      console.log(`Bank transfer initiated: ${bankDetails.accountName}, Amount: £${submission.finalPrice}, Reference: ${paymentReference}`);
+      
+      // Note: To enable automated bank transfers, you need to:
+      // 1. Set up Stripe Connect or Open Banking API
+      // 2. Add API credentials to environment variables
+      // 3. Implement bank transfer API call here
+    }
+
+    // Update submission
+    submission.paymentReference = paymentReference;
+    submission.paymentStatus = 'processing';
+    submission.paymentDate = new Date().toISOString();
+    submission.status = 'completed';
+    submission.updatedAt = new Date().toISOString();
+    
+    // Save to MongoDB if available
+    if (db) {
+      try {
+        await db.collection('submissions').replaceOne({ id: submission.id }, submission);
+      } catch (error) {
+        console.error('Error saving to MongoDB:', error);
+      }
+    }
+    
+    // Also update in-memory
+    const index = tradeInSubmissions.findIndex(s => s.id === submission.id);
+    if (index !== -1) {
+      tradeInSubmissions[index] = submission;
+    } else {
+      tradeInSubmissions.push(submission);
+    }
+    
+    // Save to file as fallback
+    await saveSubmissions();
+
+    // Send payment email to customer
+    try {
+      let emailSubject = '';
+      let emailContent = '';
+      
+      if (paymentMethod === 'paypal') {
+        emailSubject = `Your PayPal Payment - Trade-In #${submission.id}`;
+        emailContent = `
+          <h2>Your Payment Has Been Processed!</h2>
+          <p>Hello ${submission.name},</p>
+          <p>Your trade-in request (#${submission.id}) has been completed and payment has been sent to your PayPal account.</p>
+          <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0;">
+            <h3 style="margin-top: 0;">Payment Details</h3>
+            <p><strong>Amount:</strong> £${submission.finalPrice.toFixed(2)}</p>
+            <p><strong>PayPal Email:</strong> ${submission.paymentDetails.paypalEmail}</p>
+            <p><strong>Payment Reference:</strong> ${paymentReference}</p>
+            <p><strong>Status:</strong> Processing (usually completes within 1-3 business days)</p>
+          </div>
+          <p>You should receive the payment in your PayPal account shortly. Please check your PayPal account for confirmation.</p>
+          <p>Thank you for trading in with us!</p>
+        `;
+      } else {
+        emailSubject = `Your Bank Transfer - Trade-In #${submission.id}`;
+        emailContent = `
+          <h2>Your Payment Has Been Processed!</h2>
+          <p>Hello ${submission.name},</p>
+          <p>Your trade-in request (#${submission.id}) has been completed and bank transfer has been initiated.</p>
+          <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0;">
+            <h3 style="margin-top: 0;">Payment Details</h3>
+            <p><strong>Amount:</strong> £${submission.finalPrice.toFixed(2)}</p>
+            <p><strong>Account Name:</strong> ${submission.paymentDetails.accountName}</p>
+            <p><strong>Account Number:</strong> ${submission.paymentDetails.accountNumber}</p>
+            <p><strong>Sort Code:</strong> ${submission.paymentDetails.sortCode}</p>
+            <p><strong>Payment Reference:</strong> ${paymentReference}</p>
+            <p><strong>Status:</strong> Processing (usually completes within 1-3 business days)</p>
+          </div>
+          <p>The payment will be transferred to your bank account. Please allow 1-3 business days for the transfer to complete.</p>
+          <p>Thank you for trading in with us!</p>
+        `;
+      }
+
+      await transporter.sendMail({
+        from: SMTP_FROM,
+        to: submission.email,
+        subject: emailSubject,
+        html: emailContent
+      });
+    } catch (emailError) {
+      console.error('Error sending payment email:', emailError);
+    }
+
+    res.json({
+      success: true,
+      message: 'Payment processed successfully',
+      paymentReference: paymentReference,
+      paymentMethod: paymentMethod,
+      amount: submission.finalPrice,
+      submission
+    });
+
+  } catch (error) {
+    console.error('Error processing cash payment:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
