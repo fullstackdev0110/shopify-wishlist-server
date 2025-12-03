@@ -676,12 +676,21 @@ app.get('/api/products/trade-in', async (req, res) => {
                tags.includes(`trade-in-${deviceTypeLower}`) ||
                product.vendor?.toLowerCase().includes(deviceTypeLower);
       });
+      
+      // If no products found for specific device type, show all trade-in products as fallback
+      // This allows users to see products even if they're not specifically tagged with device type
+      if (filteredProducts.length === 0 && allProducts.length > 0) {
+        console.log(`⚠️ No products found with "${deviceType}" tag. Showing all trade-in products as fallback.`);
+        filteredProducts = allProducts;
+      }
     }
 
     res.json({
       success: true,
       products: filteredProducts,
-      count: filteredProducts.length
+      count: filteredProducts.length,
+      deviceType: deviceType || 'all',
+      filtered: deviceType ? filteredProducts.length < allProducts.length : false
     });
 
   } catch (error) {
