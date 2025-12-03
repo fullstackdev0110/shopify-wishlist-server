@@ -572,6 +572,29 @@ app.get('/api/products/trade-in', async (req, res) => {
 
       if (data.errors) {
         console.error('GraphQL errors fetching products:', data.errors);
+        
+        // Check for access denied errors
+        const accessDeniedError = data.errors.find(err => 
+          err.extensions?.code === 'ACCESS_DENIED' || 
+          err.message?.includes('Access denied')
+        );
+        
+        if (accessDeniedError) {
+          return res.status(403).json({
+            success: false,
+            error: 'Shopify API permission denied',
+            message: 'Your Shopify access token is missing the required "read_products" scope.',
+            details: data.errors,
+            fix: {
+              step1: 'Go to Shopify Admin → Settings → Apps and sales channels → Develop apps',
+              step2: 'Find your app (or create new) → Configuration tab',
+              step3: 'Enable "read_products" scope in Admin API integration scopes',
+              step4: 'Save and update SHOPIFY_ACCESS_TOKEN in your environment variables',
+              documentation: 'See SHOPIFY_API_PERMISSIONS_FIX.md for detailed instructions'
+            }
+          });
+        }
+        
         return res.status(500).json({
           success: false,
           error: 'Failed to fetch products from Shopify',
