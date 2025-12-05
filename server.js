@@ -1204,6 +1204,14 @@ app.get('/api/products/trade-in', async (req, res) => {
       const key = `${product.brand}_${product.model}`;
       
       if (!acc[key]) {
+        // Use the first available image from any variant of this model
+        const productImage = product.imageUrl ? {
+          url: product.imageUrl,
+          altText: `${product.brand} ${product.model}`,
+          width: 800,
+          height: 800
+        } : null;
+        
         acc[key] = {
           id: product._id.toString(),
           gid: `gid://database/Product/${product._id}`,
@@ -1211,20 +1219,22 @@ app.get('/api/products/trade-in', async (req, res) => {
           handle: `${product.brand}-${product.model}`.toLowerCase().replace(/\s+/g, '-'),
           vendor: product.brand,
           tags: [product.deviceType || 'phone', 'trade-in'],
-          featuredImage: product.imageUrl ? {
-            url: product.imageUrl,
-            altText: `${product.brand} ${product.model}`,
-            width: 800,
-            height: 800
-          } : null,
-          images: product.imageUrl ? [{
-            url: product.imageUrl,
-            altText: `${product.brand} ${product.model}`,
-            width: 800,
-            height: 800
-          }] : [],
+          featuredImage: productImage,
+          images: productImage ? [productImage] : [],
           variants: []
         };
+      } else {
+        // If product group exists but doesn't have an image yet, and this product has one, use it
+        if (!acc[key].featuredImage && product.imageUrl) {
+          const productImage = {
+            url: product.imageUrl,
+            altText: `${product.brand} ${product.model}`,
+            width: 800,
+            height: 800
+          };
+          acc[key].featuredImage = productImage;
+          acc[key].images = [productImage];
+        }
       }
 
       // Add variant (storage + color combination)
@@ -1259,9 +1269,14 @@ app.get('/api/products/trade-in', async (req, res) => {
         title: productArray[0].title,
         vendor: productArray[0].vendor,
         variantsCount: productArray[0].variants?.length || 0,
-        hasImage: !!productArray[0].featuredImage
+        hasImage: !!productArray[0].featuredImage,
+        imageUrl: productArray[0].featuredImage?.url || 'No image'
       });
     }
+    
+    // Count products with images
+    const productsWithImages = productArray.filter(p => p.featuredImage).length;
+    console.log(`🖼️ Products with images: ${productsWithImages}/${productArray.length}`);
 
     res.json({
       success: true,
