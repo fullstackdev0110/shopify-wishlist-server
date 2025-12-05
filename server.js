@@ -1309,6 +1309,18 @@ app.get('/api/products/admin', async (req, res) => {
     }
 
     const products = await db.collection('trade_in_products').find({}).sort({ brand: 1, model: 1, storage: 1 }).toArray();
+    
+    // Log sample product to verify imageUrl is present
+    if (products.length > 0) {
+      console.log(`📦 Admin: Fetched ${products.length} products`);
+      console.log(`🖼️ Sample product imageUrl:`, {
+        brand: products[0].brand,
+        model: products[0].model,
+        storage: products[0].storage,
+        imageUrl: products[0].imageUrl || 'NULL/EMPTY',
+        hasImageUrl: !!products[0].imageUrl
+      });
+    }
 
     res.json({
       success: true,
@@ -1691,6 +1703,8 @@ app.post('/api/products/import-excel', async (req, res) => {
           // Log imageUrl for debugging
           if (imageUrl) {
             console.log(`💾 Saving product with imageUrl: ${brand} ${model} ${storage} - ${imageUrl.substring(0, 60)}...`);
+          } else {
+            console.log(`⚠️ No imageUrl for ${brand} ${model} ${storage}`);
           }
 
           if (existing) {
