@@ -782,25 +782,41 @@ app.post('/api/pricing/calculate', async (req, res) => {
           // Extract product data from variantId or fetch from database
           // VariantId format: gid://database/Variant/{productId}_{storage}_{color}
           // Example: gid://database/Variant/507f1f77bcf86cd799439011_256GB_default
+          // Or without prefix: 507f1f77bcf86cd799439011_256GB_default
           console.log('🔍 Parsing database variantId:', variantId);
           
           let product = null;
           
           // Try to extract MongoDB ObjectId from variantId
           // Format: gid://database/Variant/{ObjectId}_{storage}_{color}
-          const variantIdMatch = variantId.match(/gid:\/\/database\/Variant\/([^_]+)_(.+)/);
+          // Or: {ObjectId}_{storage}_{color}
+          let dbProductId = null;
+          let storageFromVariant = null;
           
-          if (variantIdMatch) {
-            const dbProductId = variantIdMatch[1];
-            const storageFromVariant = variantIdMatch[2].split('_')[0]; // Get storage (before color if exists)
-            
-            console.log('📦 Extracted from variantId:', { dbProductId, storageFromVariant });
+          if (variantId.includes('gid://database/Variant/')) {
+            const variantIdMatch = variantId.match(/gid:\/\/database\/Variant\/([^_]+)_(.+)/);
+            if (variantIdMatch) {
+              dbProductId = variantIdMatch[1];
+              storageFromVariant = variantIdMatch[2].split('_')[0]; // Get storage (before color if exists)
+            }
+          } else {
+            // Try without prefix: {ObjectId}_{storage}_{color}
+            const parts = variantId.split('_');
+            if (parts.length >= 2) {
+              dbProductId = parts[0];
+              storageFromVariant = parts[1];
+            }
+          }
+          
+          if (dbProductId) {
+            console.log('📦 Extracted from variantId:', { dbProductId, storageFromVariant, storage });
             
             try {
               // Try to find by MongoDB ObjectId
+              const searchStorage = storage || storageFromVariant;
               product = await db.collection('trade_in_products').findOne({ 
                 _id: new ObjectId(dbProductId),
-                storage: storage || storageFromVariant
+                ...(searchStorage ? { storage: searchStorage } : {})
               });
               
               if (product) {
@@ -1277,9 +1293,11 @@ app.get('/api/products/trade-in', async (req, res) => {
       }
 
       // Add variant (storage + color combination)
+      // Use full gid format for both id and gid to ensure consistency
+      const variantGid = `gid://database/Variant/${product._id}_${product.storage}_${product.color || 'default'}`;
       const variant = {
-        id: `${product._id}_${product.storage}_${product.color || 'default'}`,
-        gid: `gid://database/Variant/${product._id}_${product.storage}_${product.color || 'default'}`,
+        id: variantGid, // Use full gid format for id as well
+        gid: variantGid,
         title: `${product.storage}${product.color ? ` - ${product.color}` : ''}`,
         price: product.prices?.Excellent || product.basePrice || 0, // Use Excellent as base or fallback
         availableForSale: true,
