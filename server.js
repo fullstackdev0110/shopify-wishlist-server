@@ -1486,10 +1486,41 @@ app.post('/api/products/import-excel', async (req, res) => {
         // Try multiple column name variations
         const brand = getColumnValue(row, ['Brand', 'brand', 'Brand Name', 'BRAND', 'BrandName']);
         const model = getColumnValue(row, ['Model', 'model', 'Product Model', 'MODEL', 'ModelName', 'Product']);
-        const storage = getColumnValue(row, ['Storage', 'storage', 'Capacity', 'capacity', 'Size', 'size', 'STORAGE']);
+        
+        // Try to find storage - check all columns including __EMPTY ones
+        let storage = getColumnValue(row, ['Storage', 'storage', 'Capacity', 'capacity', 'Size', 'size', 'STORAGE']);
+        
+        // If storage not found, try to extract from model name (e.g., "iPhone 13 128GB")
+        if (!storage && model) {
+          const storageMatch = model.match(/\b(\d+\s*(GB|TB|MB))\b/i);
+          if (storageMatch) {
+            storage = storageMatch[1];
+          }
+        }
+        
+        // If still not found, check __EMPTY columns for storage-like values
+        if (!storage) {
+          const rowKeys = Object.keys(row);
+          for (const key of rowKeys) {
+            if (key.startsWith('__EMPTY')) {
+              const value = String(row[key] || '').trim();
+              // Check if it looks like storage (contains GB, TB, MB, or is a number)
+              if (value && (/\b(\d+\s*(GB|TB|MB))\b/i.test(value) || /^\d+$/.test(value))) {
+                storage = value;
+                break;
+              }
+            }
+          }
+        }
+        
+        // If still not found, use "Default" as fallback
+        if (!storage) {
+          storage = 'Default';
+        }
+        
         const color = getColumnValue(row, ['Color', 'color', 'Colour', 'colour', 'COLOR']) || null;
-        const deviceType = (getColumnValue(row, ['Device Type', 'deviceType', 'DeviceType', 'Device', 'device', 'Type', 'type']) || 'phone').toLowerCase();
-        const imageUrl = getColumnValue(row, ['Image URL', 'imageUrl', 'ImageUrl', 'Image', 'image', 'Image Link', 'imageLink']) || null;
+        const deviceType = (getColumnValue(row, ['Device Type', 'deviceType', 'DeviceType', 'Device', 'device', 'DEVICE', 'Type', 'type']) || 'phone').toLowerCase();
+        const imageUrl = getColumnValue(row, ['Image URL', 'imageUrl', 'ImageUrl', 'Image', 'image', 'Image Link', 'imageLink', 'image_url']) || null;
 
         // Extract prices for each condition (try multiple variations)
         const prices = {
@@ -1509,16 +1540,20 @@ app.post('/api/products/import-excel', async (req, res) => {
           }
         });
 
-        if (!brand || !model || !storage) {
+        if (!brand || !model) {
           const missing = [];
           if (!brand) missing.push('Brand');
           if (!model) missing.push('Model');
-          if (!storage) missing.push('Storage');
           results.errors.push({ 
             row: i + 2, 
             error: `Missing required fields: ${missing.join(', ')}. Available columns: ${Object.keys(row).join(', ')}` 
           });
           continue;
+        }
+        
+        // Storage is now optional (will use "Default" if not found)
+        if (!storage) {
+          storage = 'Default';
         }
 
         // Check if product exists
