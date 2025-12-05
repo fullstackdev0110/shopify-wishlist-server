@@ -1382,7 +1382,74 @@ app.post('/api/products/import-excel', async (req, res) => {
     const workbook = XLSX.read(buffer, { type: 'buffer' });
     const sheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[sheetName];
-    const data = XLSX.utils.sheet_to_json(worksheet);
+    
+    // Get all rows as arrays to find the header row
+    const range = XLSX.utils.decode_range(worksheet['!ref'] || 'A1');
+    let headerRowIndex = 0;
+    let headerRow = null;
+    
+    // Try first 10 rows to find headers
+    for (let row = 0; row <= Math.min(9, range.e.r); row++) {
+      const rowData = [];
+      for (let col = range.s.c; col <= range.e.c; col++) {
+        const cellAddress = XLSX.utils.encode_cell({ r: row, c: col });
+        const cell = worksheet[cellAddress];
+        const value = cell ? (cell.v !== undefined ? String(cell.v).trim() : '') : '';
+        rowData.push(value);
+      }
+      
+      // Check if this row contains header-like values (case-insensitive)
+      const rowString = rowData.join(' ').toLowerCase();
+      const hasBrand = rowData.some(cell => /brand/i.test(cell));
+      const hasModel = rowData.some(cell => /model/i.test(cell));
+      const hasStorage = rowData.some(cell => /storage|capacity|size/i.test(cell));
+      const hasPrice = rowData.some(cell => /excellent|good|fair|faulty|price/i.test(cell));
+      
+      if ((hasBrand && hasModel) || (hasModel && hasStorage) || (hasModel && hasPrice)) {
+        headerRowIndex = row;
+        headerRow = rowData;
+        console.log(`📋 Found header row at index ${row}:`, rowData);
+        break;
+      }
+    }
+    
+    // If no header found, use first row
+    if (!headerRow) {
+      console.log('⚠️ No header row found, using first row');
+      headerRowIndex = 0;
+      const firstRow = [];
+      for (let col = range.s.c; col <= range.e.c; col++) {
+        const cellAddress = XLSX.utils.encode_cell({ r: 0, c: col });
+        const cell = worksheet[cellAddress];
+        firstRow.push(cell ? (cell.v !== undefined ? String(cell.v).trim() : '') : '');
+      }
+      headerRow = firstRow;
+    }
+    
+    // Read data with custom header mapping
+    const allRows = [];
+    for (let row = headerRowIndex + 1; row <= range.e.r; row++) {
+      const rowData = {};
+      for (let col = range.s.c; col <= range.e.c; col++) {
+        const cellAddress = XLSX.utils.encode_cell({ r: row, c: col });
+        const cell = worksheet[cellAddress];
+        const value = cell ? (cell.v !== undefined ? String(cell.v).trim() : '') : '';
+        const headerName = headerRow[col - range.s.c] || `__EMPTY_${col}`;
+        rowData[headerName] = value;
+      }
+      // Only add non-empty rows
+      if (Object.values(rowData).some(v => v && v !== '')) {
+        allRows.push(rowData);
+      }
+    }
+    
+    const data = allRows;
+    
+    // Log first row to see structure
+    if (data.length > 0) {
+      console.log('📋 First data row keys:', Object.keys(data[0]));
+      console.log('📋 First data row sample:', JSON.stringify(data[0], null, 2));
+    }
 
     // Helper function to find column value (case-insensitive, tries multiple variations)
     const getColumnValue = (row, possibleNames) => {
