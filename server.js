@@ -1480,65 +1480,18 @@ app.post('/api/products/import-excel', async (req, res) => {
       changes: []
     };
 
+    // Storage capacities to look for
+    const storageOptions = ['64GB', '128GB', '256GB', '512GB', '1TB', '2TB'];
+    
     for (let i = 0; i < data.length; i++) {
       const row = data[i];
       try {
-        // Try multiple column name variations
+        // Get basic info
         const brand = getColumnValue(row, ['Brand', 'brand', 'Brand Name', 'BRAND', 'BrandName']);
         const model = getColumnValue(row, ['Model', 'model', 'Product Model', 'MODEL', 'ModelName', 'Product']);
-        
-        // Try to find storage - check all columns including __EMPTY ones
-        let storage = getColumnValue(row, ['Storage', 'storage', 'Capacity', 'capacity', 'Size', 'size', 'STORAGE']);
-        
-        // If storage not found, try to extract from model name (e.g., "iPhone 13 128GB")
-        if (!storage && model) {
-          const storageMatch = model.match(/\b(\d+\s*(GB|TB|MB))\b/i);
-          if (storageMatch) {
-            storage = storageMatch[1];
-          }
-        }
-        
-        // If still not found, check __EMPTY columns for storage-like values
-        if (!storage) {
-          const rowKeys = Object.keys(row);
-          for (const key of rowKeys) {
-            if (key.startsWith('__EMPTY')) {
-              const value = String(row[key] || '').trim();
-              // Check if it looks like storage (contains GB, TB, MB, or is a number)
-              if (value && (/\b(\d+\s*(GB|TB|MB))\b/i.test(value) || /^\d+$/.test(value))) {
-                storage = value;
-                break;
-              }
-            }
-          }
-        }
-        
-        // If still not found, use "Default" as fallback
-        if (!storage) {
-          storage = 'Default';
-        }
-        
-        const color = getColumnValue(row, ['Color', 'color', 'Colour', 'colour', 'COLOR']) || null;
         const deviceType = (getColumnValue(row, ['Device Type', 'deviceType', 'DeviceType', 'Device', 'device', 'DEVICE', 'Type', 'type']) || 'phone').toLowerCase();
         const imageUrl = getColumnValue(row, ['Image URL', 'imageUrl', 'ImageUrl', 'Image', 'image', 'Image Link', 'imageLink', 'image_url']) || null;
-
-        // Extract prices for each condition (try multiple variations)
-        const prices = {
-          Excellent: getColumnValue(row, ['Excellent', 'excellent', 'EXCELLENT', 'Like New', 'likeNew', 'LikeNew']) || null,
-          Good: getColumnValue(row, ['Good', 'good', 'GOOD']) || null,
-          Fair: getColumnValue(row, ['Fair', 'fair', 'FAIR']) || null,
-          Faulty: getColumnValue(row, ['Faulty', 'faulty', 'FAULTY', 'Poor', 'poor', 'POOR']) || null
-        };
-
-        // Convert price strings to numbers
-        Object.keys(prices).forEach(key => {
-          if (prices[key] !== null && prices[key] !== undefined && prices[key] !== '') {
-            const num = parseFloat(prices[key]);
-            prices[key] = isNaN(num) ? null : num;
-          } else {
-            prices[key] = null;
-          }
-        });
+        const color = getColumnValue(row, ['Color', 'color', 'Colour', 'colour', 'COLOR']) || null;
 
         if (!brand || !model) {
           const missing = [];
@@ -1550,71 +1503,141 @@ app.post('/api/products/import-excel', async (req, res) => {
           });
           continue;
         }
+
+        // Extract prices for each storage capacity and condition
+        // Excel structure: DEVICE | BRAND | MODEL | EXCELLENT (64GB, 128GB, 256GB, ...) | GOOD (64GB, 128GB, ...) | FAIR (64GB, 128GB, ...) | FAULTY | image_url
+        // The storage columns are __EMPTY columns positioned after each condition header
         
-        // Storage is now optional (will use "Default" if not found)
-        if (!storage) {
-          storage = 'Default';
-        }
-
-        // Check if product exists
-        const existing = await db.collection('trade_in_products').findOne({
-          brand: brand.trim(),
-          model: model.trim(),
-          storage: storage.trim(),
-          color: color ? color.trim() : null,
-          deviceType: deviceType
+        // Get all column names in order
+        const allColumns = Object.keys(row);
+        
+        // Find positions of condition headers
+        let excellentIdx = -1, goodIdx = -1, fairIdx = -1, faultyIdx = -1;
+        allColumns.forEach((col, idx) => {
+          const colUpper = col.toUpperCase();
+          if (colUpper === 'EXCELLENT' && excellentIdx === -1) excellentIdx = idx;
+          if (colUpper === 'GOOD' && goodIdx === -1) goodIdx = idx;
+          if (colUpper === 'FAIR' && fairIdx === -1) fairIdx = idx;
+          if (colUpper === 'FAULTY' && faultyIdx === -1) faultyIdx = idx;
         });
+        
+        // For each storage option, extract prices from each condition section
+        for (let storageIdx = 0; storageIdx < storageOptions.length; storageIdx++) {
+          const storage = storageOptions[storageIdx];
+          const prices = {
+            Excellent: null,
+            Good: null,
+            Fair: null,
+            Faulty: null
+          };
+          
+          // Extract from EXCELLENT section (columns after EXCELLENT header)
+          if (excellentIdx !== -1) {
+            const colIdx = excellentIdx + 1 + storageIdx; // +1 to skip header, +storageIdx for position
+            if (colIdx < allColumns.length) {
+              const colName = allColumns[colIdx];
+              const val = parseFloat(row[colName]);
+              if (!isNaN(val) && val > 0) prices.Excellent = val;
+            }
+          }
+          
+          // Extract from GOOD section
+          if (goodIdx !== -1) {
+            const colIdx = goodIdx + 1 + storageIdx;
+            if (colIdx < allColumns.length) {
+              const colName = allColumns[colIdx];
+              const val = parseFloat(row[colName]);
+              if (!isNaN(val) && val > 0) prices.Good = val;
+            }
+          }
+          
+          // Extract from FAIR section
+          if (fairIdx !== -1) {
+            const colIdx = fairIdx + 1 + storageIdx;
+            if (colIdx < allColumns.length) {
+              const colName = allColumns[colIdx];
+              const val = parseFloat(row[colName]);
+              if (!isNaN(val) && val > 0) prices.Fair = val;
+            }
+          }
+          
+          // Extract from FAULTY section (usually just one "PRICE" column)
+          if (faultyIdx !== -1) {
+            const colIdx = faultyIdx + 1; // Usually just one price column after FAULTY
+            if (colIdx < allColumns.length) {
+              const colName = allColumns[colIdx];
+              const val = parseFloat(row[colName]);
+              if (!isNaN(val) && val > 0) prices.Faulty = val;
+            }
+          }
+          
+          // Only create product if at least one price exists
+          const hasAnyPrice = prices.Excellent !== null || prices.Good !== null || prices.Fair !== null || prices.Faulty !== null;
+          
+          if (!hasAnyPrice) {
+            continue; // Skip this storage if no prices
+          }
+          
+          // Check if product exists
+          const existing = await db.collection('trade_in_products').findOne({
+            brand: brand.trim(),
+            model: model.trim(),
+            storage: storage,
+            color: color ? color.trim() : null,
+            deviceType: deviceType
+          });
 
-        const productData = {
-          brand: brand.trim(),
-          model: model.trim(),
-          storage: storage.trim(),
-          color: color ? color.trim() : null,
-          deviceType: deviceType,
-          imageUrl: imageUrl || null,
-          prices: prices,
-          updatedAt: new Date().toISOString()
-        };
+          const productData = {
+            brand: brand.trim(),
+            model: model.trim(),
+            storage: storage,
+            color: color ? color.trim() : null,
+            deviceType: deviceType,
+            imageUrl: imageUrl || null,
+            prices: prices,
+            updatedAt: new Date().toISOString()
+          };
 
-        if (existing) {
-          // Track changes
-          const changes = [];
-          if (existing.prices?.Excellent !== prices.Excellent) {
-            changes.push({ field: 'Excellent', old: existing.prices?.Excellent, new: prices.Excellent });
-          }
-          if (existing.prices?.Good !== prices.Good) {
-            changes.push({ field: 'Good', old: existing.prices?.Good, new: prices.Good });
-          }
-          if (existing.prices?.Fair !== prices.Fair) {
-            changes.push({ field: 'Fair', old: existing.prices?.Fair, new: prices.Fair });
-          }
-          if (existing.prices?.Faulty !== prices.Faulty) {
-            changes.push({ field: 'Faulty', old: existing.prices?.Faulty, new: prices.Faulty });
-          }
-          if (existing.imageUrl !== imageUrl) {
-            changes.push({ field: 'imageUrl', old: existing.imageUrl, new: imageUrl });
-          }
+          if (existing) {
+            // Track changes
+            const changes = [];
+            if (existing.prices?.Excellent !== prices.Excellent) {
+              changes.push({ field: 'Excellent', old: existing.prices?.Excellent, new: prices.Excellent });
+            }
+            if (existing.prices?.Good !== prices.Good) {
+              changes.push({ field: 'Good', old: existing.prices?.Good, new: prices.Good });
+            }
+            if (existing.prices?.Fair !== prices.Fair) {
+              changes.push({ field: 'Fair', old: existing.prices?.Fair, new: prices.Fair });
+            }
+            if (existing.prices?.Faulty !== prices.Faulty) {
+              changes.push({ field: 'Faulty', old: existing.prices?.Faulty, new: prices.Faulty });
+            }
+            if (existing.imageUrl !== imageUrl) {
+              changes.push({ field: 'imageUrl', old: existing.imageUrl, new: imageUrl });
+            }
 
-          await db.collection('trade_in_products').updateOne(
-            { _id: existing._id },
-            { $set: productData }
-          );
+            await db.collection('trade_in_products').updateOne(
+              { _id: existing._id },
+              { $set: productData }
+            );
 
-          results.updated++;
-          if (changes.length > 0) {
+            results.updated++;
+            if (changes.length > 0) {
+              results.changes.push({
+                product: `${brand} ${model} ${storage}${color ? ` ${color}` : ''}`,
+                changes: changes
+              });
+            }
+          } else {
+            productData.createdAt = new Date().toISOString();
+            await db.collection('trade_in_products').insertOne(productData);
+            results.new++;
             results.changes.push({
               product: `${brand} ${model} ${storage}${color ? ` ${color}` : ''}`,
-              changes: changes
+              changes: [{ field: 'status', old: null, new: 'Created' }]
             });
           }
-        } else {
-          productData.createdAt = new Date().toISOString();
-          await db.collection('trade_in_products').insertOne(productData);
-          results.new++;
-          results.changes.push({
-            product: `${brand} ${model} ${storage}${color ? ` ${color}` : ''}`,
-            changes: [{ field: 'status', old: null, new: 'Created' }]
-          });
         }
 
       } catch (error) {
