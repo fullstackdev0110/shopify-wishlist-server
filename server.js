@@ -1511,6 +1511,17 @@ app.post('/api/products/import-excel', async (req, res) => {
     // Log available columns from first row for debugging
     if (data.length > 0) {
       console.log('📋 Available columns in Excel:', Object.keys(data[0]));
+      // Check for image URL column
+      const firstRow = data[0];
+      const imageCols = Object.keys(firstRow).filter(col => {
+        const colLower = col.toLowerCase();
+        return colLower.includes('image') || colLower.includes('img') || colLower.includes('url');
+      });
+      if (imageCols.length > 0) {
+        console.log('🖼️ Found potential image URL columns:', imageCols);
+      } else {
+        console.log('⚠️ No image URL columns found in Excel');
+      }
     }
 
     const results = {
@@ -1530,8 +1541,44 @@ app.post('/api/products/import-excel', async (req, res) => {
         const brand = getColumnValue(row, ['Brand', 'brand', 'Brand Name', 'BRAND', 'BrandName']);
         const model = getColumnValue(row, ['Model', 'model', 'Product Model', 'MODEL', 'ModelName', 'Product']);
         const deviceType = (getColumnValue(row, ['Device Type', 'deviceType', 'DeviceType', 'Device', 'device', 'DEVICE', 'Type', 'type']) || 'phone').toLowerCase();
-        const imageUrl = getColumnValue(row, ['Image URL', 'imageUrl', 'ImageUrl', 'Image', 'image', 'Image Link', 'imageLink', 'image_url']) || null;
         const color = getColumnValue(row, ['Color', 'color', 'Colour', 'colour', 'COLOR']) || null;
+        
+        // Find image URL column - check all possible variations and positions
+        let imageUrl = null;
+        const imageColumnNames = ['Image URL', 'imageUrl', 'ImageUrl', 'Image', 'image', 'Image Link', 'imageLink', 'image_url', 'IMAGE_URL', 'imageUrl', 'ImageUrl'];
+        
+        // First try direct column name match
+        for (const colName of imageColumnNames) {
+          const val = getColumnValue(row, [colName]);
+          if (val && val.trim() !== '') {
+            imageUrl = val.trim();
+            break;
+          }
+        }
+        
+        // If not found, search through all columns for image-related names
+        if (!imageUrl) {
+          const allCols = Object.keys(row);
+          for (const col of allCols) {
+            const colLower = col.toLowerCase();
+            if ((colLower.includes('image') || colLower.includes('img') || colLower.includes('url')) && 
+                row[col] && row[col].toString().trim() !== '' && 
+                !colLower.includes('excellent') && !colLower.includes('good') && !colLower.includes('fair') && !colLower.includes('faulty')) {
+              const val = row[col];
+              if (val && typeof val === 'string' && (val.startsWith('http://') || val.startsWith('https://') || val.startsWith('//'))) {
+                imageUrl = val.trim();
+                console.log(`📷 Found image URL in column "${col}": ${imageUrl}`);
+                break;
+              }
+            }
+          }
+        }
+        
+        if (!imageUrl) {
+          imageUrl = null;
+        } else {
+          console.log(`✅ Found image URL for ${brand} ${model}: ${imageUrl.substring(0, 50)}...`);
+        }
 
         if (!brand || !model) {
           const missing = [];
