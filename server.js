@@ -781,22 +781,61 @@ app.post('/api/pricing/calculate', async (req, res) => {
 
           // Extract product data from variantId or fetch from database
           // VariantId format: gid://database/Variant/{productId}_{storage}_{color}
-          const variantParts = variantId.split('_');
-          const dbProductId = variantParts[0].replace('gid://database/Variant/', '').replace('gid://database/Product/', '');
+          // Example: gid://database/Variant/507f1f77bcf86cd799439011_256GB_default
+          console.log('🔍 Parsing database variantId:', variantId);
           
-          // Try to find product by ID or by brand/model/storage/color
           let product = null;
-          try {
-            product = await db.collection('trade_in_products').findOne({ _id: new ObjectId(dbProductId) });
-          } catch (e) {
-            // If ObjectId fails, try to find by brand/model/storage/color from request
-            if (brand && model && storage) {
-              product = await db.collection('trade_in_products').findOne({
-                brand: brand.trim(),
-                model: model.trim(),
-                storage: storage.trim(),
-                color: req.body.color ? req.body.color.trim() : null
+          
+          // Try to extract MongoDB ObjectId from variantId
+          // Format: gid://database/Variant/{ObjectId}_{storage}_{color}
+          const variantIdMatch = variantId.match(/gid:\/\/database\/Variant\/([^_]+)_(.+)/);
+          
+          if (variantIdMatch) {
+            const dbProductId = variantIdMatch[1];
+            const storageFromVariant = variantIdMatch[2].split('_')[0]; // Get storage (before color if exists)
+            
+            console.log('📦 Extracted from variantId:', { dbProductId, storageFromVariant });
+            
+            try {
+              // Try to find by MongoDB ObjectId
+              product = await db.collection('trade_in_products').findOne({ 
+                _id: new ObjectId(dbProductId),
+                storage: storage || storageFromVariant
               });
+              
+              if (product) {
+                console.log('✅ Found product by ObjectId:', product.brand, product.model, product.storage);
+              }
+            } catch (e) {
+              console.log('⚠️ ObjectId parsing failed, trying alternative lookup:', e.message);
+            }
+          }
+          
+          // If not found by ID, try to find by brand/model/storage/color
+          if (!product && brand && model && storage) {
+            console.log('🔍 Trying to find by brand/model/storage:', { brand, model, storage, color: req.body.color });
+            product = await db.collection('trade_in_products').findOne({
+              brand: brand.trim(),
+              model: model.trim(),
+              storage: storage.trim(),
+              color: req.body.color ? req.body.color.trim() : null
+            });
+            
+            if (product) {
+              console.log('✅ Found product by brand/model/storage:', product.brand, product.model, product.storage);
+            }
+          }
+          
+          // If still not found, try without color
+          if (!product && brand && model && storage) {
+            product = await db.collection('trade_in_products').findOne({
+              brand: brand.trim(),
+              model: model.trim(),
+              storage: storage.trim()
+            });
+            
+            if (product) {
+              console.log('✅ Found product by brand/model/storage (without color):', product.brand, product.model, product.storage);
             }
           }
 
