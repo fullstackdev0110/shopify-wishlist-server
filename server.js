@@ -1384,6 +1384,28 @@ app.post('/api/products/import-excel', async (req, res) => {
     const worksheet = workbook.Sheets[sheetName];
     const data = XLSX.utils.sheet_to_json(worksheet);
 
+    // Helper function to find column value (case-insensitive, tries multiple variations)
+    const getColumnValue = (row, possibleNames) => {
+      for (const name of possibleNames) {
+        // Try exact match first
+        if (row[name] !== undefined && row[name] !== null && row[name] !== '') {
+          return row[name];
+        }
+        // Try case-insensitive match
+        const rowKeys = Object.keys(row);
+        const matchedKey = rowKeys.find(key => key.toLowerCase().trim() === name.toLowerCase().trim());
+        if (matchedKey && row[matchedKey] !== undefined && row[matchedKey] !== null && row[matchedKey] !== '') {
+          return row[matchedKey];
+        }
+      }
+      return null;
+    };
+
+    // Log available columns from first row for debugging
+    if (data.length > 0) {
+      console.log('📋 Available columns in Excel:', Object.keys(data[0]));
+    }
+
     const results = {
       new: 0,
       updated: 0,
@@ -1394,19 +1416,20 @@ app.post('/api/products/import-excel', async (req, res) => {
     for (let i = 0; i < data.length; i++) {
       const row = data[i];
       try {
-        const brand = row['Brand'] || row['brand'];
-        const model = row['Model'] || row['model'];
-        const storage = row['Storage'] || row['storage'];
-        const color = row['Color'] || row['color'] || null;
-        const deviceType = (row['Device Type'] || row['deviceType'] || row['DeviceType'] || 'phone').toLowerCase();
-        const imageUrl = row['Image URL'] || row['imageUrl'] || row['ImageUrl'] || null;
+        // Try multiple column name variations
+        const brand = getColumnValue(row, ['Brand', 'brand', 'Brand Name', 'BRAND', 'BrandName']);
+        const model = getColumnValue(row, ['Model', 'model', 'Product Model', 'MODEL', 'ModelName', 'Product']);
+        const storage = getColumnValue(row, ['Storage', 'storage', 'Capacity', 'capacity', 'Size', 'size', 'STORAGE']);
+        const color = getColumnValue(row, ['Color', 'color', 'Colour', 'colour', 'COLOR']) || null;
+        const deviceType = (getColumnValue(row, ['Device Type', 'deviceType', 'DeviceType', 'Device', 'device', 'Type', 'type']) || 'phone').toLowerCase();
+        const imageUrl = getColumnValue(row, ['Image URL', 'imageUrl', 'ImageUrl', 'Image', 'image', 'Image Link', 'imageLink']) || null;
 
-        // Extract prices for each condition
+        // Extract prices for each condition (try multiple variations)
         const prices = {
-          Excellent: row['Excellent'] || row['excellent'] || null,
-          Good: row['Good'] || row['good'] || null,
-          Fair: row['Fair'] || row['fair'] || null,
-          Faulty: row['Faulty'] || row['faulty'] || null
+          Excellent: getColumnValue(row, ['Excellent', 'excellent', 'EXCELLENT', 'Like New', 'likeNew', 'LikeNew']) || null,
+          Good: getColumnValue(row, ['Good', 'good', 'GOOD']) || null,
+          Fair: getColumnValue(row, ['Fair', 'fair', 'FAIR']) || null,
+          Faulty: getColumnValue(row, ['Faulty', 'faulty', 'FAULTY', 'Poor', 'poor', 'POOR']) || null
         };
 
         // Convert price strings to numbers
@@ -1420,7 +1443,14 @@ app.post('/api/products/import-excel', async (req, res) => {
         });
 
         if (!brand || !model || !storage) {
-          results.errors.push({ row: i + 2, error: 'Missing required fields: Brand, Model, Storage' });
+          const missing = [];
+          if (!brand) missing.push('Brand');
+          if (!model) missing.push('Model');
+          if (!storage) missing.push('Storage');
+          results.errors.push({ 
+            row: i + 2, 
+            error: `Missing required fields: ${missing.join(', ')}. Available columns: ${Object.keys(row).join(', ')}` 
+          });
           continue;
         }
 
