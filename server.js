@@ -1,9 +1,10 @@
 const express = require('express');
 const fetch = require('node-fetch');
 const nodemailer = require('nodemailer');
-const { MongoClient } = require('mongodb');
+const { MongoClient, ObjectId } = require('mongodb');
 const fs = require('fs').promises;
 const path = require('path');
+const XLSX = require('xlsx');
 const app = express();
 
 // Enable CORS for Shopify store - MUST BE BEFORE OTHER MIDDLEWARE
@@ -760,67 +761,134 @@ app.post('/api/pricing/calculate', async (req, res) => {
     }
 
     let basePrice = null;
+    let useConditionPrice = false; // Flag to use direct condition price vs multiplier
 
-    // NEW SYSTEM: Use Shopify product variant
+    // NEW SYSTEM: Check if database product or Shopify product
     if (productId && variantId) {
-      try {
-        // Fetch variant price from Shopify
-        const variantQuery = `
-          query getVariant($id: ID!) {
-            productVariant(id: $id) {
-              id
-              price
-              product {
-                id
-                title
-              }
+      // Check if it's a database product (gid://database)
+      if (variantId.includes('gid://database') || productId.includes('database')) {
+        try {
+          await ensureMongoConnection();
+          if (!db) {
+            return res.status(500).json({
+              success: false,
+              error: 'Database connection failed'
+            });
+          }
+
+          // Extract product data from variantId or fetch from database
+          // VariantId format: gid://database/Variant/{productId}_{storage}_{color}
+          const variantParts = variantId.split('_');
+          const dbProductId = variantParts[0].replace('gid://database/Variant/', '').replace('gid://database/Product/', '');
+          
+          // Try to find product by ID or by brand/model/storage/color
+          let product = null;
+          try {
+            product = await db.collection('trade_in_products').findOne({ _id: new ObjectId(dbProductId) });
+          } catch (e) {
+            // If ObjectId fails, try to find by brand/model/storage/color from request
+            if (brand && model && storage) {
+              product = await db.collection('trade_in_products').findOne({
+                brand: brand.trim(),
+                model: model.trim(),
+                storage: storage.trim(),
+                color: req.body.color ? req.body.color.trim() : null
+              });
             }
           }
-        `;
 
-        const variantGid = variantId.startsWith('gid://') ? variantId : `gid://shopify/ProductVariant/${variantId}`;
-        
-        const response = await fetch(`https://${SHOPIFY_SHOP}/admin/api/2024-01/graphql.json`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
-          },
-          body: JSON.stringify({
-            query: variantQuery,
-            variables: { id: variantGid }
-          })
-        });
+          if (!product) {
+            return res.status(404).json({
+              success: false,
+              error: 'Product not found in database'
+            });
+          }
 
-        const data = await response.json();
+          // Check if condition-specific price exists
+          const conditionPrice = product.prices?.[condition];
+          
+          if (conditionPrice === null || conditionPrice === undefined) {
+            return res.status(404).json({
+              success: false,
+              error: `Price not available for condition: ${condition}`,
+              availableConditions: Object.keys(product.prices || {}).filter(c => product.prices[c] !== null)
+            });
+          }
 
-        if (data.errors) {
-          console.error('GraphQL errors fetching variant:', data.errors);
-          return res.status(404).json({
+          // Use condition-specific price directly (no multiplier needed)
+          basePrice = conditionPrice;
+          useConditionPrice = true;
+          console.log(`✅ Found condition price from database: £${basePrice} for ${product.brand} ${product.model} ${product.storage} (${condition})`);
+
+        } catch (error) {
+          console.error('Error fetching product from database:', error);
+          return res.status(500).json({
             success: false,
-            error: 'Variant not found in Shopify',
-            details: data.errors
+            error: 'Failed to fetch product price from database',
+            message: error.message
           });
         }
+      } else {
+        // Shopify product (legacy support)
+        try {
+          // Fetch variant price from Shopify
+          const variantQuery = `
+            query getVariant($id: ID!) {
+              productVariant(id: $id) {
+                id
+                price
+                product {
+                  id
+                  title
+                }
+              }
+            }
+          `;
 
-        const variant = data.data?.productVariant;
-        if (!variant) {
-          return res.status(404).json({
+          const variantGid = variantId.startsWith('gid://') ? variantId : `gid://shopify/ProductVariant/${variantId}`;
+          
+          const response = await fetch(`https://${SHOPIFY_SHOP}/admin/api/2024-01/graphql.json`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+            },
+            body: JSON.stringify({
+              query: variantQuery,
+              variables: { id: variantGid }
+            })
+          });
+
+          const data = await response.json();
+
+          if (data.errors) {
+            console.error('GraphQL errors fetching variant:', data.errors);
+            return res.status(404).json({
+              success: false,
+              error: 'Variant not found in Shopify',
+              details: data.errors
+            });
+          }
+
+          const variant = data.data?.productVariant;
+          if (!variant) {
+            return res.status(404).json({
+              success: false,
+              error: 'Variant not found'
+            });
+          }
+
+          basePrice = parseFloat(variant.price);
+          console.log(`✅ Found variant price from Shopify: £${basePrice} for ${variant.product.title}`);
+
+        } catch (error) {
+          console.error('Error fetching variant from Shopify:', error);
+          return res.status(500).json({
             success: false,
-            error: 'Variant not found'
+            error: 'Failed to fetch variant price from Shopify',
+            message: error.message
           });
         }
-
-        basePrice = parseFloat(variant.price);
-        console.log(`✅ Found variant price from Shopify: £${basePrice} for ${variant.product.title}`);
-
-      } catch (error) {
-        console.error('Error fetching variant from Shopify:', error);
-        return res.status(500).json({
-          success: false,
-          error: 'Failed to fetch variant price from Shopify',
-          message: error.message
-        });
       }
     }
     // OLD SYSTEM: Use pricing rules (backward compatibility)
@@ -884,19 +952,28 @@ app.post('/api/pricing/calculate', async (req, res) => {
       });
     }
 
-    // Get condition multiplier
-    const multiplier = conditionMultipliers[condition];
-    if (!multiplier) {
-      return res.status(400).json({ 
-        success: false,
-        error: 'Invalid condition',
-        requestedCondition: condition,
-        availableConditions: Object.keys(conditionMultipliers)
-      });
-    }
+    // If using condition-specific price from database, no multiplier needed
+    let finalPrice = basePrice;
+    let multiplier = 1.0;
 
-    // Calculate final price
-    const finalPrice = Math.round(basePrice * multiplier * 100) / 100; // Round to 2 decimals
+    if (!useConditionPrice) {
+      // Use condition multiplier (for Shopify products or legacy system)
+      const conditionMultiplier = conditionMultipliers[condition];
+      if (!conditionMultiplier) {
+        return res.status(400).json({ 
+          success: false,
+          error: 'Invalid condition',
+          requestedCondition: condition,
+          availableConditions: Object.keys(conditionMultipliers)
+        });
+      }
+
+      multiplier = conditionMultiplier;
+      finalPrice = Math.round(basePrice * multiplier * 100) / 100; // Round to 2 decimals
+    } else {
+      // Already using condition-specific price, just round
+      finalPrice = Math.round(basePrice * 100) / 100;
+    }
 
     res.json({
       success: true,
@@ -906,7 +983,7 @@ app.post('/api/pricing/calculate', async (req, res) => {
       currency: 'GBP',
       formattedPrice: `£${finalPrice.toFixed(2)}`,
       // Include system type for debugging
-      system: productId && variantId ? 'variant-based' : 'legacy'
+      system: useConditionPrice ? 'database-condition-specific' : (productId && variantId ? 'shopify-variant' : 'legacy')
     });
 
   } catch (error) {
@@ -1076,6 +1153,402 @@ app.get('/api/pricing/export', async (req, res) => {
 
   } catch (error) {
     console.error('Error exporting pricing rules:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ============================================
+// DATABASE-DRIVEN PRODUCT MANAGEMENT ENDPOINTS
+// ============================================
+
+// Get trade-in products from MongoDB (replaces Shopify API)
+app.get('/api/products/trade-in', async (req, res) => {
+  try {
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({
+        success: false,
+        error: 'Database connection failed'
+      });
+    }
+
+    const { deviceType } = req.query;
+
+    // Build query
+    const query = {};
+    if (deviceType && deviceType.trim() !== '') {
+      query.deviceType = deviceType.toLowerCase();
+    }
+
+    // Fetch products from MongoDB
+    const products = await db.collection('trade_in_products').find(query).toArray();
+
+    // Transform to match frontend expected format
+    const transformedProducts = products.reduce((acc, product) => {
+      // Group by brand and model
+      const key = `${product.brand}_${product.model}`;
+      
+      if (!acc[key]) {
+        acc[key] = {
+          id: product._id.toString(),
+          gid: `gid://database/Product/${product._id}`,
+          title: product.model,
+          handle: `${product.brand}-${product.model}`.toLowerCase().replace(/\s+/g, '-'),
+          vendor: product.brand,
+          tags: [product.deviceType || 'phone', 'trade-in'],
+          featuredImage: product.imageUrl ? {
+            url: product.imageUrl,
+            altText: `${product.brand} ${product.model}`,
+            width: 800,
+            height: 800
+          } : null,
+          images: product.imageUrl ? [{
+            url: product.imageUrl,
+            altText: `${product.brand} ${product.model}`,
+            width: 800,
+            height: 800
+          }] : [],
+          variants: []
+        };
+      }
+
+      // Add variant (storage + color combination)
+      const variant = {
+        id: `${product._id}_${product.storage}_${product.color || 'default'}`,
+        gid: `gid://database/Variant/${product._id}_${product.storage}_${product.color || 'default'}`,
+        title: `${product.storage}${product.color ? ` - ${product.color}` : ''}`,
+        price: product.prices?.Excellent || product.basePrice || 0, // Use Excellent as base or fallback
+        availableForSale: true,
+        image: product.imageUrl ? {
+          url: product.imageUrl,
+          altText: `${product.brand} ${product.model} ${product.storage}`
+        } : null,
+        options: {
+          storage: product.storage,
+          color: product.color || 'Default'
+        },
+        // Store full product data for pricing calculation
+        _productData: product
+      };
+
+      acc[key].variants.push(variant);
+
+      return acc;
+    }, {});
+
+    const productArray = Object.values(transformedProducts);
+
+    res.json({
+      success: true,
+      products: productArray,
+      count: productArray.length,
+      deviceType: deviceType || 'all'
+    });
+
+  } catch (error) {
+    console.error('Error fetching products from database:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error',
+      message: error.message
+    });
+  }
+});
+
+// Get all products (admin)
+app.get('/api/products/admin', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    const products = await db.collection('trade_in_products').find({}).sort({ brand: 1, model: 1, storage: 1 }).toArray();
+
+    res.json({
+      success: true,
+      products: products,
+      count: products.length
+    });
+
+  } catch (error) {
+    console.error('Error fetching products for admin:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Create or update product (admin)
+app.post('/api/products/admin', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    const { id, brand, model, storage, color, deviceType, imageUrl, prices } = req.body;
+
+    if (!brand || !model || !storage || !deviceType) {
+      return res.status(400).json({ error: 'Missing required fields: brand, model, storage, deviceType' });
+    }
+
+    const productData = {
+      brand: brand.trim(),
+      model: model.trim(),
+      storage: storage.trim(),
+      color: color ? color.trim() : null,
+      deviceType: deviceType.toLowerCase(),
+      imageUrl: imageUrl || null,
+      prices: prices || {}, // { Excellent: 500, Good: 400, Fair: 300, Faulty: null }
+      updatedAt: new Date().toISOString()
+    };
+
+    if (id) {
+      // Update existing
+      const result = await db.collection('trade_in_products').updateOne(
+        { _id: new ObjectId(id) },
+        { $set: productData }
+      );
+      res.json({ success: true, updated: result.modifiedCount > 0, id });
+    } else {
+      // Create new
+      productData.createdAt = new Date().toISOString();
+      const result = await db.collection('trade_in_products').insertOne(productData);
+      res.json({ success: true, id: result.insertedId.toString() });
+    }
+
+  } catch (error) {
+    console.error('Error saving product:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Delete product (admin)
+app.delete('/api/products/admin/:id', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    const { id } = req.params;
+    const result = await db.collection('trade_in_products').deleteOne({ _id: new ObjectId(id) });
+
+    res.json({ success: true, deleted: result.deletedCount > 0 });
+
+  } catch (error) {
+    console.error('Error deleting product:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Import Excel file (admin)
+app.post('/api/products/import-excel', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    // Note: In production, you'd use multer or similar to handle file upload
+    // For now, expecting base64 encoded Excel file in request body
+    const { fileData, fileName } = req.body;
+
+    if (!fileData) {
+      return res.status(400).json({ error: 'No file data provided' });
+    }
+
+    // Decode base64
+    const buffer = Buffer.from(fileData, 'base64');
+    const workbook = XLSX.read(buffer, { type: 'buffer' });
+    const sheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[sheetName];
+    const data = XLSX.utils.sheet_to_json(worksheet);
+
+    const results = {
+      new: 0,
+      updated: 0,
+      errors: [],
+      changes: []
+    };
+
+    for (let i = 0; i < data.length; i++) {
+      const row = data[i];
+      try {
+        const brand = row['Brand'] || row['brand'];
+        const model = row['Model'] || row['model'];
+        const storage = row['Storage'] || row['storage'];
+        const color = row['Color'] || row['color'] || null;
+        const deviceType = (row['Device Type'] || row['deviceType'] || row['DeviceType'] || 'phone').toLowerCase();
+        const imageUrl = row['Image URL'] || row['imageUrl'] || row['ImageUrl'] || null;
+
+        // Extract prices for each condition
+        const prices = {
+          Excellent: row['Excellent'] || row['excellent'] || null,
+          Good: row['Good'] || row['good'] || null,
+          Fair: row['Fair'] || row['fair'] || null,
+          Faulty: row['Faulty'] || row['faulty'] || null
+        };
+
+        // Convert price strings to numbers
+        Object.keys(prices).forEach(key => {
+          if (prices[key] !== null && prices[key] !== undefined && prices[key] !== '') {
+            const num = parseFloat(prices[key]);
+            prices[key] = isNaN(num) ? null : num;
+          } else {
+            prices[key] = null;
+          }
+        });
+
+        if (!brand || !model || !storage) {
+          results.errors.push({ row: i + 2, error: 'Missing required fields: Brand, Model, Storage' });
+          continue;
+        }
+
+        // Check if product exists
+        const existing = await db.collection('trade_in_products').findOne({
+          brand: brand.trim(),
+          model: model.trim(),
+          storage: storage.trim(),
+          color: color ? color.trim() : null,
+          deviceType: deviceType
+        });
+
+        const productData = {
+          brand: brand.trim(),
+          model: model.trim(),
+          storage: storage.trim(),
+          color: color ? color.trim() : null,
+          deviceType: deviceType,
+          imageUrl: imageUrl || null,
+          prices: prices,
+          updatedAt: new Date().toISOString()
+        };
+
+        if (existing) {
+          // Track changes
+          const changes = [];
+          if (existing.prices?.Excellent !== prices.Excellent) {
+            changes.push({ field: 'Excellent', old: existing.prices?.Excellent, new: prices.Excellent });
+          }
+          if (existing.prices?.Good !== prices.Good) {
+            changes.push({ field: 'Good', old: existing.prices?.Good, new: prices.Good });
+          }
+          if (existing.prices?.Fair !== prices.Fair) {
+            changes.push({ field: 'Fair', old: existing.prices?.Fair, new: prices.Fair });
+          }
+          if (existing.prices?.Faulty !== prices.Faulty) {
+            changes.push({ field: 'Faulty', old: existing.prices?.Faulty, new: prices.Faulty });
+          }
+          if (existing.imageUrl !== imageUrl) {
+            changes.push({ field: 'imageUrl', old: existing.imageUrl, new: imageUrl });
+          }
+
+          await db.collection('trade_in_products').updateOne(
+            { _id: existing._id },
+            { $set: productData }
+          );
+
+          results.updated++;
+          if (changes.length > 0) {
+            results.changes.push({
+              product: `${brand} ${model} ${storage}${color ? ` ${color}` : ''}`,
+              changes: changes
+            });
+          }
+        } else {
+          productData.createdAt = new Date().toISOString();
+          await db.collection('trade_in_products').insertOne(productData);
+          results.new++;
+          results.changes.push({
+            product: `${brand} ${model} ${storage}${color ? ` ${color}` : ''}`,
+            changes: [{ field: 'status', old: null, new: 'Created' }]
+          });
+        }
+
+      } catch (error) {
+        results.errors.push({ row: i + 2, error: error.message });
+      }
+    }
+
+    res.json({
+      success: true,
+      summary: {
+        total: data.length,
+        new: results.new,
+        updated: results.updated,
+        errors: results.errors.length
+      },
+      changes: results.changes,
+      errors: results.errors
+    });
+
+  } catch (error) {
+    console.error('Error importing Excel:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Export products to Excel (admin)
+app.get('/api/products/export-excel', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    const products = await db.collection('trade_in_products').find({}).sort({ brand: 1, model: 1, storage: 1 }).toArray();
+
+    // Convert to Excel format
+    const excelData = products.map(p => ({
+      'Brand': p.brand,
+      'Model': p.model,
+      'Storage': p.storage,
+      'Color': p.color || '',
+      'Device Type': p.deviceType,
+      'Image URL': p.imageUrl || '',
+      'Excellent': p.prices?.Excellent || '',
+      'Good': p.prices?.Good || '',
+      'Fair': p.prices?.Fair || '',
+      'Faulty': p.prices?.Faulty || ''
+    }));
+
+    const worksheet = XLSX.utils.json_to_sheet(excelData);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Products');
+
+    const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename=trade-in-products-${new Date().toISOString().split('T')[0]}.xlsx`);
+    res.send(buffer);
+
+  } catch (error) {
+    console.error('Error exporting Excel:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
