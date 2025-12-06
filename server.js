@@ -1441,6 +1441,54 @@ app.post('/api/products/admin', async (req, res) => {
   }
 });
 
+// Update product (admin)
+app.put('/api/products/admin/:id', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    const { id } = req.params;
+    const { brand, model, storage, color, deviceType, imageUrl, prices } = req.body;
+
+    if (!brand || !model || !storage || !deviceType) {
+      return res.status(400).json({ error: 'Missing required fields: brand, model, storage, deviceType' });
+    }
+
+    const productData = {
+      brand: brand.trim(),
+      model: model.trim(),
+      storage: storage.trim(),
+      color: color ? color.trim() : null,
+      deviceType: deviceType.toLowerCase(),
+      imageUrl: imageUrl || null,
+      prices: prices || {},
+      updatedAt: new Date().toISOString()
+    };
+
+    const result = await db.collection('trade_in_products').updateOne(
+      { _id: new ObjectId(id) },
+      { $set: productData }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+
+    res.json({ success: true, updated: result.modifiedCount > 0, id });
+
+  } catch (error) {
+    console.error('Error updating product:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
 // Delete product (admin)
 app.delete('/api/products/admin/:id', async (req, res) => {
   try {
