@@ -10,7 +10,7 @@ const app = express();
 // Enable CORS for Shopify store - MUST BE BEFORE OTHER MIDDLEWARE
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*'); // Allow all origins
-  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type, X-API-Key');
   
   // Handle preflight requests
@@ -1219,6 +1219,20 @@ app.get('/api/pricing/export', async (req, res) => {
 // DATABASE-DRIVEN PRODUCT MANAGEMENT ENDPOINTS
 // ============================================
 
+// Helper function to get default image URL based on device type
+function getDefaultImageUrl(deviceType) {
+  const defaultImages = {
+    phone: 'https://cdn.shopify.com/s/files/1/1002/3944/2245/files/new_phone_brand.png?v=1764998845',
+    tablet: 'https://cdn.shopify.com/s/files/1/1002/3944/2245/files/new_tablet_brand.png?v=1764998844',
+    laptop: 'https://cdn.shopify.com/s/files/1/1002/3944/2245/files/new_laptop_brand.png?v=1764998845',
+    gaming: 'https://cdn.shopify.com/s/files/1/1002/3944/2245/files/new_gaming_brand.png?v=1764998845',
+    watch: 'https://cdn.shopify.com/s/files/1/1002/3944/2245/files/new_watch_brand.png?v=1764998844'
+  };
+  
+  const normalizedType = (deviceType || 'phone').toLowerCase();
+  return defaultImages[normalizedType] || defaultImages.phone;
+}
+
 // Get trade-in products from MongoDB (replaces Shopify API)
 app.get('/api/products/trade-in', async (req, res) => {
   try {
@@ -1259,13 +1273,14 @@ app.get('/api/products/trade-in', async (req, res) => {
       const key = `${product.brand}_${product.model}`;
       
       if (!acc[key]) {
-        // Use the first available image from any variant of this model
-        const productImage = product.imageUrl ? {
-          url: product.imageUrl,
+        // Use product image or default image based on device type
+        const imageUrl = product.imageUrl || getDefaultImageUrl(product.deviceType);
+        const productImage = {
+          url: imageUrl,
           altText: `${product.brand} ${product.model}`,
           width: 800,
           height: 800
-        } : null;
+        };
         
         acc[key] = {
           id: product._id.toString(),
@@ -1275,14 +1290,15 @@ app.get('/api/products/trade-in', async (req, res) => {
           vendor: product.brand,
           tags: [product.deviceType || 'phone', 'trade-in'],
           featuredImage: productImage,
-          images: productImage ? [productImage] : [],
+          images: [productImage],
           variants: []
         };
       } else {
-        // If product group exists but doesn't have an image yet, and this product has one, use it
-        if (!acc[key].featuredImage && product.imageUrl) {
+        // If product group exists but doesn't have an image yet, use this product's image or default
+        if (!acc[key].featuredImage || !product.imageUrl) {
+          const imageUrl = product.imageUrl || getDefaultImageUrl(product.deviceType);
           const productImage = {
-            url: product.imageUrl,
+            url: imageUrl,
             altText: `${product.brand} ${product.model}`,
             width: 800,
             height: 800
@@ -1301,10 +1317,10 @@ app.get('/api/products/trade-in', async (req, res) => {
         title: `${product.storage}${product.color ? ` - ${product.color}` : ''}`,
         price: product.prices?.Excellent || product.basePrice || 0, // Use Excellent as base or fallback
         availableForSale: true,
-        image: product.imageUrl ? {
-          url: product.imageUrl,
+        image: {
+          url: product.imageUrl || getDefaultImageUrl(product.deviceType),
           altText: `${product.brand} ${product.model} ${product.storage}`
-        } : null,
+        },
         options: {
           storage: product.storage,
           color: product.color || 'Default'
