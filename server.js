@@ -1492,13 +1492,17 @@ app.post('/api/products/import-excel', async (req, res) => {
     const sheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[sheetName];
     
-    // Get all rows as arrays to find the header row
+    // Get all rows as arrays to find the header rows
+    // Excel structure: Row 1 = "UPDATED: date", Row 2 = Main headers (DEVICE, BRAND, MODEL, EXCELLENT, GOOD, FAIR, FAULTY, image_url)
+    // Row 3 = Sub-headers (64GB, 128GB, etc. under each condition), Row 4+ = Data
     const range = XLSX.utils.decode_range(worksheet['!ref'] || 'A1');
-    let headerRowIndex = 0;
-    let headerRow = null;
+    let mainHeaderRowIndex = -1; // Row 2 (index 1)
+    let subHeaderRowIndex = -1;  // Row 3 (index 2)
+    let mainHeaderRow = null;
+    let subHeaderRow = null;
     
-    // Try first 10 rows to find headers
-    for (let row = 0; row <= Math.min(9, range.e.r); row++) {
+    // Try first 5 rows to find headers
+    for (let row = 0; row <= Math.min(4, range.e.r); row++) {
       const rowData = [];
       for (let col = range.s.c; col <= range.e.c; col++) {
         const cellAddress = XLSX.utils.encode_cell({ r: row, c: col });
@@ -1507,43 +1511,86 @@ app.post('/api/products/import-excel', async (req, res) => {
         rowData.push(value);
       }
       
-      // Check if this row contains header-like values (case-insensitive)
-      const rowString = rowData.join(' ').toLowerCase();
-      const hasBrand = rowData.some(cell => /brand/i.test(cell));
-      const hasModel = rowData.some(cell => /model/i.test(cell));
-      const hasStorage = rowData.some(cell => /storage|capacity|size/i.test(cell));
-      const hasPrice = rowData.some(cell => /excellent|good|fair|faulty|price/i.test(cell));
+      // Check if this is the main header row (has DEVICE, BRAND, MODEL, EXCELLENT, GOOD, FAIR, FAULTY)
+      const hasDevice = rowData.some(cell => /^device$/i.test(cell));
+      const hasBrand = rowData.some(cell => /^brand$/i.test(cell));
+      const hasModel = rowData.some(cell => /^model$/i.test(cell));
+      const hasExcellent = rowData.some(cell => /^excellent$/i.test(cell));
+      const hasGood = rowData.some(cell => /^good$/i.test(cell));
+      const hasFair = rowData.some(cell => /^fair$/i.test(cell));
+      const hasFaulty = rowData.some(cell => /^faulty$/i.test(cell));
       
-      if ((hasBrand && hasModel) || (hasModel && hasStorage) || (hasModel && hasPrice)) {
-        headerRowIndex = row;
-        headerRow = rowData;
-        console.log(`📋 Found header row at index ${row}:`, rowData);
+      if (hasDevice && hasBrand && hasModel && (hasExcellent || hasGood || hasFair || hasFaulty)) {
+        mainHeaderRowIndex = row;
+        mainHeaderRow = rowData;
+        console.log(`📋 Found main header row at index ${row}:`, rowData);
+        
+        // Next row should be sub-headers (storage sizes)
+        if (row + 1 <= range.e.r) {
+          const subRowData = [];
+          for (let col = range.s.c; col <= range.e.c; col++) {
+            const cellAddress = XLSX.utils.encode_cell({ r: row + 1, c: col });
+            const cell = worksheet[cellAddress];
+            subRowData.push(cell ? (cell.v !== undefined ? String(cell.v).trim() : '') : '');
+          }
+          subHeaderRowIndex = row + 1;
+          subHeaderRow = subRowData;
+          console.log(`📋 Found sub-header row at index ${row + 1}:`, subRowData);
+        }
         break;
       }
     }
     
-    // If no header found, use first row
-    if (!headerRow) {
-      console.log('⚠️ No header row found, using first row');
-      headerRowIndex = 0;
+    // If no header found, use row 1 as main header and row 2 as sub-header
+    if (mainHeaderRowIndex === -1) {
+      console.log('⚠️ No main header row found, using row 1 and 2');
+      mainHeaderRowIndex = 0;
+      subHeaderRowIndex = 1;
       const firstRow = [];
+      const secondRow = [];
       for (let col = range.s.c; col <= range.e.c; col++) {
-        const cellAddress = XLSX.utils.encode_cell({ r: 0, c: col });
-        const cell = worksheet[cellAddress];
-        firstRow.push(cell ? (cell.v !== undefined ? String(cell.v).trim() : '') : '');
+        const cellAddress1 = XLSX.utils.encode_cell({ r: 0, c: col });
+        const cellAddress2 = XLSX.utils.encode_cell({ r: 1, c: col });
+        const cell1 = worksheet[cellAddress1];
+        const cell2 = worksheet[cellAddress2];
+        firstRow.push(cell1 ? (cell1.v !== undefined ? String(cell1.v).trim() : '') : '');
+        secondRow.push(cell2 ? (cell2.v !== undefined ? String(cell2.v).trim() : '') : '');
       }
-      headerRow = firstRow;
+      mainHeaderRow = firstRow;
+      subHeaderRow = secondRow;
     }
     
-    // Read data with custom header mapping
+    // Build column mapping: combine main header with sub-header for storage columns
+    // For condition columns (EXCELLENT, GOOD, FAIR), use sub-header (64GB, 128GB, etc.)
+    // For other columns (DEVICE, BRAND, MODEL, FAULTY, image_url), use main header
+    const columnMapping = [];
+    for (let col = range.s.c; col <= range.e.c; col++) {
+      const colIdx = col - range.s.c;
+      const mainHeader = mainHeaderRow[colIdx] || '';
+      const subHeader = subHeaderRow && subHeaderRow[colIdx] ? subHeaderRow[colIdx] : '';
+      
+      // If main header is a condition (EXCELLENT, GOOD, FAIR) and sub-header exists, use sub-header
+      // Otherwise use main header
+      const mainUpper = mainHeader.toUpperCase().trim();
+      if ((mainUpper === 'EXCELLENT' || mainUpper === 'GOOD' || mainUpper === 'FAIR') && subHeader) {
+        columnMapping.push(subHeader || `__EMPTY_${colIdx}`);
+      } else {
+        columnMapping.push(mainHeader || subHeader || `__EMPTY_${colIdx}`);
+      }
+    }
+    
+    console.log('📋 Column mapping:', columnMapping);
+    
+    // Read data starting from row after sub-header row
+    const dataStartRow = subHeaderRowIndex !== -1 ? subHeaderRowIndex + 1 : mainHeaderRowIndex + 1;
     const allRows = [];
-    for (let row = headerRowIndex + 1; row <= range.e.r; row++) {
+    for (let row = dataStartRow; row <= range.e.r; row++) {
       const rowData = {};
       for (let col = range.s.c; col <= range.e.c; col++) {
         const cellAddress = XLSX.utils.encode_cell({ r: row, c: col });
         const cell = worksheet[cellAddress];
         const value = cell ? (cell.v !== undefined ? String(cell.v).trim() : '') : '';
-        const headerName = headerRow[col - range.s.c] || `__EMPTY_${col}`;
+        const headerName = columnMapping[col - range.s.c] || `__EMPTY_${col}`;
         rowData[headerName] = value;
       }
       // Only add non-empty rows
@@ -1664,8 +1711,8 @@ app.post('/api/products/import-excel', async (req, res) => {
         }
 
         // Extract prices for each storage capacity and condition
-        // Excel structure: DEVICE | BRAND | MODEL | EXCELLENT (64GB, 128GB, 256GB, ...) | GOOD (64GB, 128GB, ...) | FAIR (64GB, 128GB, ...) | FAULTY | image_url
-        // The storage columns are __EMPTY columns positioned after each condition header
+        // Excel structure: DEVICE | BRAND | MODEL | EXCELLENT (64GB, 128GB, 256GB, ...) | GOOD (64GB, 128GB, ...) | FAIR (64GB, 128GB, ...) | FAULTY (64GB, 128GB, ...) | image_url
+        // Storage columns can be either named (64GB, 128GB, etc.) or __EMPTY columns positioned after each condition header
         
         // Get all column names in order
         const allColumns = Object.keys(row);
@@ -1673,12 +1720,50 @@ app.post('/api/products/import-excel', async (req, res) => {
         // Find positions of condition headers
         let excellentIdx = -1, goodIdx = -1, fairIdx = -1, faultyIdx = -1;
         allColumns.forEach((col, idx) => {
-          const colUpper = col.toUpperCase();
+          const colUpper = col.toUpperCase().trim();
           if (colUpper === 'EXCELLENT' && excellentIdx === -1) excellentIdx = idx;
           if (colUpper === 'GOOD' && goodIdx === -1) goodIdx = idx;
           if (colUpper === 'FAIR' && fairIdx === -1) fairIdx = idx;
           if (colUpper === 'FAULTY' && faultyIdx === -1) faultyIdx = idx;
         });
+        
+        // Helper to find storage column for a condition
+        const findStorageColumn = (conditionStartIdx, storage) => {
+          // Normalize storage for matching (e.g., "128GB" matches "128GB", "128 GB", "__EMPTY_X")
+          const storageNormalized = storage.toUpperCase().replace(/\s+/g, '');
+          
+          // First, try to find a column that matches the storage name exactly
+          for (let i = conditionStartIdx + 1; i < allColumns.length; i++) {
+            const colName = allColumns[i];
+            const colUpper = colName.toUpperCase().replace(/\s+/g, '');
+            
+            // If we hit the next condition header, stop
+            if (colUpper === 'EXCELLENT' || colUpper === 'GOOD' || colUpper === 'FAIR' || colUpper === 'FAULTY') {
+              break;
+            }
+            
+            // Check if column name matches storage
+            if (colUpper === storageNormalized || colUpper.includes(storageNormalized) || storageNormalized.includes(colUpper)) {
+              return colName;
+            }
+          }
+          
+          // If not found by name, try sequential position (for __EMPTY columns)
+          const storageIndex = storageOptions.indexOf(storage);
+          if (storageIndex !== -1) {
+            const colIdx = conditionStartIdx + 1 + storageIndex;
+            if (colIdx < allColumns.length) {
+              const colName = allColumns[colIdx];
+              // Make sure we haven't hit the next condition header
+              const colUpper = colName.toUpperCase().trim();
+              if (colUpper !== 'EXCELLENT' && colUpper !== 'GOOD' && colUpper !== 'FAIR' && colUpper !== 'FAULTY') {
+                return colName;
+              }
+            }
+          }
+          
+          return null;
+        };
         
         // For each storage option, extract prices from each condition section
         for (let storageIdx = 0; storageIdx < storageOptions.length; storageIdx++) {
@@ -1690,11 +1775,10 @@ app.post('/api/products/import-excel', async (req, res) => {
             Faulty: null
           };
           
-          // Extract from EXCELLENT section (columns after EXCELLENT header)
+          // Extract from EXCELLENT section
           if (excellentIdx !== -1) {
-            const colIdx = excellentIdx + 1 + storageIdx; // +1 to skip header, +storageIdx for position
-            if (colIdx < allColumns.length) {
-              const colName = allColumns[colIdx];
+            const colName = findStorageColumn(excellentIdx, storage);
+            if (colName && row[colName]) {
               const val = parseFloat(row[colName]);
               if (!isNaN(val) && val > 0) prices.Excellent = val;
             }
@@ -1702,9 +1786,8 @@ app.post('/api/products/import-excel', async (req, res) => {
           
           // Extract from GOOD section
           if (goodIdx !== -1) {
-            const colIdx = goodIdx + 1 + storageIdx;
-            if (colIdx < allColumns.length) {
-              const colName = allColumns[colIdx];
+            const colName = findStorageColumn(goodIdx, storage);
+            if (colName && row[colName]) {
               const val = parseFloat(row[colName]);
               if (!isNaN(val) && val > 0) prices.Good = val;
             }
@@ -1712,19 +1795,17 @@ app.post('/api/products/import-excel', async (req, res) => {
           
           // Extract from FAIR section
           if (fairIdx !== -1) {
-            const colIdx = fairIdx + 1 + storageIdx;
-            if (colIdx < allColumns.length) {
-              const colName = allColumns[colIdx];
+            const colName = findStorageColumn(fairIdx, storage);
+            if (colName && row[colName]) {
               const val = parseFloat(row[colName]);
               if (!isNaN(val) && val > 0) prices.Fair = val;
             }
           }
           
-          // Extract from FAULTY section (usually just one "PRICE" column)
+          // Extract from FAULTY section
           if (faultyIdx !== -1) {
-            const colIdx = faultyIdx + 1; // Usually just one price column after FAULTY
-            if (colIdx < allColumns.length) {
-              const colName = allColumns[colIdx];
+            const colName = findStorageColumn(faultyIdx, storage);
+            if (colName && row[colName]) {
               const val = parseFloat(row[colName]);
               if (!isNaN(val) && val > 0) prices.Faulty = val;
             }
