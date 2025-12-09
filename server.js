@@ -1852,6 +1852,193 @@ app.get('/api/staff/verify-access', async (req, res) => {
   }
 });
 
+// Send verification code to email
+app.post('/api/staff/send-verification-code', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { email } = req.body;
+    if (!email || !email.trim()) {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    // Check if email exists in staff members
+    const staff = await db.collection('staff_members').findOne({ 
+      email: email.trim().toLowerCase(),
+      active: true 
+    });
+
+    if (!staff) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Email not found in staff database. Please contact administrator.' 
+      });
+    }
+
+    // Generate 6-digit verification code
+    const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes from now
+
+    // Store verification code in database
+    await db.collection('verification_codes').updateOne(
+      { email: email.trim().toLowerCase() },
+      {
+        $set: {
+          code: verificationCode,
+          expiresAt: expiresAt,
+          createdAt: new Date(),
+          attempts: 0
+        }
+      },
+      { upsert: true }
+    );
+
+    // Send verification code via email
+    try {
+      await transporter.sendMail({
+        from: SMTP_FROM,
+        to: email.trim(),
+        subject: 'Admin Access Verification Code',
+        html: `
+          <h2>Admin Access Verification</h2>
+          <p>Hello ${staff.name || email},</p>
+          <p>You requested access to the admin panel. Use the verification code below to complete your login:</p>
+          <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0; text-align: center;">
+            <p style="font-size: 32px; font-weight: bold; letter-spacing: 4px; color: #1a73e8; margin: 0;">${verificationCode}</p>
+          </div>
+          <p><strong>This code will expire in 10 minutes.</strong></p>
+          <p>If you didn't request this code, please ignore this email or contact your administrator.</p>
+        `
+      });
+    } catch (emailError) {
+      console.error('Error sending verification email:', emailError);
+      return res.status(500).json({ 
+        success: false,
+        error: 'Failed to send verification email. Please check email configuration.' 
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Verification code sent to your email',
+      expiresIn: 600 // 10 minutes in seconds
+    });
+
+  } catch (error) {
+    console.error('Error sending verification code:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Verify code and grant access
+app.post('/api/staff/verify-code', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { email, code } = req.body;
+    if (!email || !email.trim()) {
+      return res.status(400).json({ error: 'Email is required' });
+    }
+    if (!code || !code.trim()) {
+      return res.status(400).json({ error: 'Verification code is required' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    // Get verification code from database
+    const verificationRecord = await db.collection('verification_codes').findOne({
+      email: email.trim().toLowerCase()
+    });
+
+    if (!verificationRecord) {
+      return res.status(400).json({
+        success: false,
+        error: 'No verification code found. Please request a new code.'
+      });
+    }
+
+    // Check if code has expired
+    if (new Date() > new Date(verificationRecord.expiresAt)) {
+      await db.collection('verification_codes').deleteOne({ email: email.trim().toLowerCase() });
+      return res.status(400).json({
+        success: false,
+        error: 'Verification code has expired. Please request a new code.'
+      });
+    }
+
+    // Check attempts (max 5 attempts)
+    if (verificationRecord.attempts >= 5) {
+      await db.collection('verification_codes').deleteOne({ email: email.trim().toLowerCase() });
+      return res.status(400).json({
+        success: false,
+        error: 'Too many failed attempts. Please request a new code.'
+      });
+    }
+
+    // Verify code
+    if (verificationRecord.code !== code.trim()) {
+      // Increment attempts
+      await db.collection('verification_codes').updateOne(
+        { email: email.trim().toLowerCase() },
+        { $inc: { attempts: 1 } }
+      );
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid verification code. Please try again.',
+        attemptsRemaining: 5 - (verificationRecord.attempts + 1)
+      });
+    }
+
+    // Code is valid - get staff info
+    const staff = await db.collection('staff_members').findOne({ 
+      email: email.trim().toLowerCase(),
+      active: true 
+    });
+
+    if (!staff) {
+      return res.status(404).json({
+        success: false,
+        error: 'Staff member not found'
+      });
+    }
+
+    // Delete used verification code
+    await db.collection('verification_codes').deleteOne({ email: email.trim().toLowerCase() });
+
+    // Return success with staff info
+    res.json({
+      success: true,
+      message: 'Email verified successfully',
+      staff: {
+        email: staff.email,
+        name: staff.name,
+        role: staff.role,
+        permissions: staff.permissions
+      },
+      isAdmin: staff.role === 'admin' || staff.role === 'manager',
+      hasAccess: true // All active staff can access pricing/trade-in
+    });
+
+  } catch (error) {
+    console.error('Error verifying code:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Get all staff members (admin only)
 app.get('/api/staff', async (req, res) => {
   try {
