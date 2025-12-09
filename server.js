@@ -1428,6 +1428,14 @@ app.post('/api/products/admin', async (req, res) => {
 
     const staffIdentifier = req.headers['x-staff-identifier'] || req.body.staffIdentifier || 'Unknown';
     
+    // Check permissions: if updating, need pricingEdit; if creating, need pricingCreate
+    const requiredPermission = id ? 'pricingEdit' : 'pricingCreate';
+    if (!await hasPermission(staffIdentifier, requiredPermission)) {
+      return res.status(403).json({ 
+        error: `Permission denied. You need "${requiredPermission}" permission to ${id ? 'edit' : 'create'} products.` 
+      });
+    }
+    
     const productData = {
       brand: brand.trim(),
       model: model.trim(),
@@ -1526,6 +1534,13 @@ app.put('/api/products/admin/:id', async (req, res) => {
     const { brand, model, storage, color, deviceType, imageUrl, prices } = req.body;
     const staffIdentifier = req.headers['x-staff-identifier'] || req.body.staffIdentifier || 'Unknown';
 
+    // Check permission
+    if (!await hasPermission(staffIdentifier, 'pricingEdit')) {
+      return res.status(403).json({ 
+        error: 'Permission denied. You need "pricingEdit" permission to edit products.' 
+      });
+    }
+
     if (!brand || !model || !storage || !deviceType) {
       return res.status(400).json({ error: 'Missing required fields: brand, model, storage, deviceType' });
     }
@@ -1610,6 +1625,13 @@ app.delete('/api/products/admin/:id', async (req, res) => {
 
     const { id } = req.params;
     const staffIdentifier = req.headers['x-staff-identifier'] || req.body.staffIdentifier || 'Unknown';
+    
+    // Check permission
+    if (!await hasPermission(staffIdentifier, 'pricingDelete')) {
+      return res.status(403).json({ 
+        error: 'Permission denied. You need "pricingDelete" permission to delete products.' 
+      });
+    }
     
     // Get product before deletion for audit log
     const product = await db.collection('trade_in_products').findOne({ _id: new ObjectId(id) });
@@ -1717,28 +1739,16 @@ app.get('/api/audit-logs', async (req, res) => {
 // STAFF MANAGEMENT SYSTEM
 // ============================================
 
-// Helper function to verify admin access
-async function verifyAdminAccess(staffEmail) {
+// Helper function to get staff member with permissions
+async function getStaffMember(staffEmail) {
   if (!staffEmail || staffEmail === 'Unknown') {
-    return false;
+    return null;
   }
 
   try {
     await ensureMongoConnection();
     if (!db) {
-      return false;
-    }
-
-    // Check if any admins exist (bootstrap mode)
-    const adminCount = await db.collection('staff_members').countDocuments({ 
-      role: { $in: ['admin', 'manager'] },
-      active: true 
-    });
-
-    // If no admins exist, allow first-time setup
-    if (adminCount === 0) {
-      console.log('⚠️ No admins found - allowing bootstrap access');
-      return true;
+      return null;
     }
 
     const staff = await db.collection('staff_members').findOne({ 
@@ -1746,16 +1756,70 @@ async function verifyAdminAccess(staffEmail) {
       active: true 
     });
 
-    if (!staff) {
-      return false;
-    }
-
-    // Only admin and manager roles can access admin pages
-    return staff.role === 'admin' || staff.role === 'manager';
+    return staff;
   } catch (error) {
-    console.error('Error verifying admin access:', error);
+    console.error('Error getting staff member:', error);
+    return null;
+  }
+}
+
+// Helper function to check if staff has specific permission
+async function hasPermission(staffEmail, permission) {
+  const staff = await getStaffMember(staffEmail);
+  if (!staff) {
     return false;
   }
+
+  // Admin and manager roles have all permissions
+  if (staff.role === 'admin' || staff.role === 'manager') {
+    return true;
+  }
+
+  // Check specific permission
+  const permissions = staff.permissions || {};
+  
+  // Support legacy permissions for backward compatibility
+  if (permission === 'pricingView' && (permissions.pricingView || permissions.pricing)) return true;
+  if (permission === 'pricingEdit' && (permissions.pricingEdit || permissions.pricing)) return true;
+  if (permission === 'pricingCreate' && permissions.pricingCreate) return true;
+  if (permission === 'pricingDelete' && permissions.pricingDelete) return true;
+  if (permission === 'pricingBulk' && permissions.pricingBulk) return true;
+  if (permission === 'pricingImport' && permissions.pricingImport) return true;
+  
+  if (permission === 'tradeInView' && (permissions.tradeInView || permissions.tradeIn)) return true;
+  if (permission === 'tradeInEdit' && (permissions.tradeInEdit || permissions.tradeIn)) return true;
+  if (permission === 'tradeInStatus' && permissions.tradeInStatus) return true;
+  if (permission === 'tradeInCredit' && permissions.tradeInCredit) return true;
+  if (permission === 'tradeInPayment' && permissions.tradeInPayment) return true;
+  
+  if (permission === 'auditView' && permissions.auditView) return true;
+  if (permission === 'staffView' && permissions.staffView) return true;
+  if (permission === 'staffEdit' && permissions.staffEdit) return true;
+
+  return permissions[permission] === true;
+}
+
+// Helper function to verify admin access
+async function verifyAdminAccess(staffEmail) {
+  const staff = await getStaffMember(staffEmail);
+  if (!staff) {
+    return false;
+  }
+
+  // Check if any admins exist (bootstrap mode)
+  const adminCount = await db.collection('staff_members').countDocuments({ 
+    role: { $in: ['admin', 'manager'] },
+    active: true 
+  });
+
+  // If no admins exist, allow first-time setup
+  if (adminCount === 0) {
+    console.log('⚠️ No admins found - allowing bootstrap access');
+    return true;
+  }
+
+  // Only admin and manager roles can access admin pages
+  return staff.role === 'admin' || staff.role === 'manager';
 }
 
 // Verify staff admin access (for Audit and Staff Admin pages - admin/manager only)
@@ -3095,6 +3159,13 @@ app.put('/api/trade-in/:id', async (req, res) => {
     const submissionId = parseInt(req.params.id);
     const updateData = req.body;
     const staffIdentifier = req.headers['x-staff-identifier'] || req.body.staffIdentifier || 'Unknown';
+    
+    // Check permission
+    if (!await hasPermission(staffIdentifier, 'tradeInEdit')) {
+      return res.status(403).json({ 
+        error: 'Permission denied. You need "tradeInEdit" permission to edit submissions.' 
+      });
+    }
 
     // Ensure MongoDB connection
     await ensureMongoConnection();
@@ -3196,6 +3267,13 @@ app.post('/api/trade-in/:id/update-status', async (req, res) => {
     const id = parseInt(req.params.id);
     const { status, notes } = req.body;
     const staffIdentifier = req.headers['x-staff-identifier'] || req.body.staffIdentifier || 'Unknown';
+    
+    // Check permission
+    if (!await hasPermission(staffIdentifier, 'tradeInStatus')) {
+      return res.status(403).json({ 
+        error: 'Permission denied. You need "tradeInStatus" permission to update submission status.' 
+      });
+    }
 
     if (!['pending', 'accepted', 'rejected', 'completed'].includes(status)) {
       return res.status(400).json({ error: 'Invalid status' });
@@ -3309,6 +3387,14 @@ app.post('/api/trade-in/:id/issue-credit', async (req, res) => {
 
     const id = parseInt(req.params.id);
     const staffIdentifier = req.headers['x-staff-identifier'] || req.body.staffIdentifier || 'Unknown';
+    
+    // Check permission
+    if (!await hasPermission(staffIdentifier, 'tradeInCredit')) {
+      return res.status(403).json({ 
+        error: 'Permission denied. You need "tradeInCredit" permission to issue gift cards.' 
+      });
+    }
+    
     let submission = null;
 
     // Ensure MongoDB connection
@@ -3666,6 +3752,13 @@ app.post('/api/trade-in/:id/issue-cash-payment', async (req, res) => {
     const id = parseInt(req.params.id);
     const { paymentMethod } = req.body; // 'bank_transfer' or 'paypal'
     const staffIdentifier = req.headers['x-staff-identifier'] || req.body.staffIdentifier || 'Unknown';
+    
+    // Check permission
+    if (!await hasPermission(staffIdentifier, 'tradeInPayment')) {
+      return res.status(403).json({ 
+        error: 'Permission denied. You need "tradeInPayment" permission to issue cash payments.' 
+      });
+    }
 
     if (!['bank_transfer', 'paypal'].includes(paymentMethod)) {
       return res.status(400).json({ error: 'Invalid payment method' });
