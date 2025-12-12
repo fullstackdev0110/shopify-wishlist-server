@@ -182,7 +182,15 @@ async function loadSubmissions() {
 // Ensure MongoDB connection (for serverless functions)
 async function ensureMongoConnection() {
   if (db) {
-    return true;
+    // Test connection is still alive
+    try {
+      await db.admin().ping();
+      return true;
+    } catch (pingError) {
+      console.log('⚠️ MongoDB connection lost, reconnecting...');
+      db = null;
+      mongoClient = null;
+    }
   }
   
   try {
@@ -5100,10 +5108,23 @@ app.put('/api/backup/config', async (req, res) => {
 // Auto backup scheduler functions
 async function performAutoBackup(type = 'incremental') {
   try {
-    await ensureMongoConnection();
+    // Ensure connection with retry for cold starts
+    let connectionAttempts = 0;
+    const maxConnectionAttempts = 3;
+    while (connectionAttempts < maxConnectionAttempts) {
+      await ensureMongoConnection();
+      if (db) break;
+      connectionAttempts++;
+      if (connectionAttempts < maxConnectionAttempts) {
+        const delay = Math.pow(2, connectionAttempts) * 1000;
+        console.log(`⏳ Retrying MongoDB connection (attempt ${connectionAttempts + 1}/${maxConnectionAttempts})...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+    
     if (!db) {
-      console.error('❌ Cannot perform auto backup: Database not connected');
-      return;
+      console.error('❌ Cannot perform auto backup: Database not connected after retries');
+      throw new Error('Database connection failed');
     }
 
     // Get backup config
@@ -5330,6 +5351,7 @@ app.get('/health', (req, res) => {
 
 // Manual trigger endpoint for auto backup (for Vercel Cron Jobs)
 app.post('/api/backup/auto', async (req, res) => {
+  let lockAcquired = false;
   try {
     // Allow Vercel Cron Jobs (they send x-vercel-cron header) or API key
     const authHeader = req.headers['x-api-key'];
@@ -5339,18 +5361,66 @@ app.post('/api/backup/auto', async (req, res) => {
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
-    await ensureMongoConnection();
+    // Retry MongoDB connection with exponential backoff for cold starts
+    let connectionAttempts = 0;
+    const maxConnectionAttempts = 3;
+    while (connectionAttempts < maxConnectionAttempts) {
+      await ensureMongoConnection();
+      if (db) break;
+      connectionAttempts++;
+      if (connectionAttempts < maxConnectionAttempts) {
+        const delay = Math.pow(2, connectionAttempts) * 1000; // 2s, 4s, 8s
+        console.log(`⏳ Retrying MongoDB connection (attempt ${connectionAttempts + 1}/${maxConnectionAttempts}) in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+
     if (!db) {
-      return res.status(500).json({ error: 'Database not connected' });
+      console.error('❌ Failed to connect to MongoDB after retries');
+      return res.status(500).json({ error: 'Database connection failed after retries' });
+    }
+
+    // Acquire backup lock to prevent concurrent backups
+    const lockKey = 'backup_in_progress';
+    const lockExpiry = new Date(Date.now() + 30 * 60 * 1000); // 30 minutes expiry
+    
+    try {
+      const existingLock = await db.collection('backup_locks').findOne({ _id: lockKey });
+      if (existingLock && new Date(existingLock.expiresAt) > new Date()) {
+        const minutesRemaining = Math.ceil((new Date(existingLock.expiresAt) - Date.now()) / 1000 / 60);
+        return res.json({ 
+          success: true, 
+          message: `Backup already in progress. Lock expires in ${minutesRemaining} minutes`,
+          skipped: true
+        });
+      }
+      
+      // Set lock
+      await db.collection('backup_locks').replaceOne(
+        { _id: lockKey },
+        { 
+          _id: lockKey,
+          expiresAt: lockExpiry.toISOString(),
+          createdAt: new Date().toISOString()
+        },
+        { upsert: true }
+      );
+      lockAcquired = true;
+      console.log('🔒 Backup lock acquired');
+    } catch (lockError) {
+      console.error('Error acquiring backup lock:', lockError);
+      return res.status(500).json({ error: 'Failed to acquire backup lock' });
     }
 
     // Get backup config
     const config = await db.collection('backup_config').findOne({ _id: 'main' });
     if (!config || !config.autoBackupEnabled) {
+      // Release lock
+      await db.collection('backup_locks').deleteOne({ _id: lockKey });
       return res.json({ success: true, message: 'Auto backup is disabled, skipping' });
     }
 
-    // Check if enough time has passed since last backup based on user's frequency setting
+    // Check if enough time has passed since last backup based on backup type
     const lastBackup = await db.collection('backups').findOne(
       {},
       { sort: { createdAt: -1 } }
@@ -5358,24 +5428,91 @@ app.post('/api/backup/auto', async (req, res) => {
 
     if (lastBackup) {
       const timeSinceLastBackup = Date.now() - new Date(lastBackup.createdAt).getTime();
-      const requiredInterval = getIntervalMs(config.incrementalBackupFrequency);
+      
+      // Determine which frequency to check based on last backup type
+      let requiredInterval;
+      let backupType = 'incremental';
+      
+      if (lastBackup.type === 'full') {
+        // If last backup was full, check if we need another full backup
+        const fullBackupInterval = getIntervalMs(config.fullBackupFrequency === 'daily' ? 'daily' : 'weekly');
+        const incrementalInterval = getIntervalMs(config.incrementalBackupFrequency);
+        
+        if (timeSinceLastBackup >= fullBackupInterval) {
+          // Time for a full backup
+          backupType = 'full';
+          requiredInterval = fullBackupInterval;
+        } else if (timeSinceLastBackup >= incrementalInterval) {
+          // Can do incremental backup
+          backupType = 'incremental';
+          requiredInterval = incrementalInterval;
+        } else {
+          // Not enough time for any backup
+          requiredInterval = incrementalInterval;
+        }
+      } else {
+        // Last backup was incremental, check incremental frequency
+        requiredInterval = getIntervalMs(config.incrementalBackupFrequency);
+        backupType = 'incremental';
+        
+        // But also check if we need a full backup
+        const lastFullBackup = await db.collection('backups').findOne(
+          { type: 'full' },
+          { sort: { createdAt: -1 } }
+        );
+        
+        if (lastFullBackup) {
+          const daysSinceFullBackup = (Date.now() - new Date(lastFullBackup.createdAt).getTime()) / (1000 * 60 * 60 * 24);
+          const fullBackupInterval = config.fullBackupFrequency === 'daily' ? 1 : 7;
+          if (daysSinceFullBackup >= fullBackupInterval) {
+            backupType = 'full';
+            requiredInterval = getIntervalMs(config.fullBackupFrequency === 'daily' ? 'daily' : 'weekly');
+          }
+        } else {
+          // No full backup exists, do a full backup
+          backupType = 'full';
+          requiredInterval = 0; // No wait needed
+        }
+      }
       
       if (timeSinceLastBackup < requiredInterval) {
         const minutesRemaining = Math.ceil((requiredInterval - timeSinceLastBackup) / 1000 / 60);
+        // Release lock
+        await db.collection('backup_locks').deleteOne({ _id: lockKey });
         return res.json({ 
           success: true, 
-          message: `Skipping backup - next backup in ${minutesRemaining} minutes`,
+          message: `Skipping backup - next ${backupType} backup in ${minutesRemaining} minutes`,
           skipped: true
         });
       }
     }
 
     // Perform backup
-    await performAutoBackup('incremental');
-    res.json({ success: true, message: 'Auto backup completed' });
+    console.log(`🔄 Starting auto ${backupType} backup...`);
+    await performAutoBackup(backupType);
+    
+    // Release lock
+    await db.collection('backup_locks').deleteOne({ _id: lockKey });
+    lockAcquired = false;
+    
+    res.json({ success: true, message: `Auto ${backupType} backup completed` });
   } catch (error) {
-    console.error('Error triggering auto backup:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('❌ Error triggering auto backup:', error);
+    console.error('Error stack:', error.stack);
+    
+    // Release lock if we acquired it
+    if (lockAcquired && db) {
+      try {
+        await db.collection('backup_locks').deleteOne({ _id: 'backup_in_progress' });
+      } catch (lockError) {
+        console.error('Error releasing backup lock:', lockError);
+      }
+    }
+    
+    res.status(500).json({ 
+      error: 'Internal server error',
+      message: error.message 
+    });
   }
 });
 
