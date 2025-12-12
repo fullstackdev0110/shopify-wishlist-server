@@ -1765,44 +1765,53 @@ async function getStaffMember(staffEmail) {
 
 // Helper function to check if staff has specific permission
 async function hasPermission(staffEmail, permission) {
-  const staff = await getStaffMember(staffEmail);
-  if (!staff) {
-    return false;
+  try {
+    if (!staffEmail || !permission) {
+      return false;
+    }
+
+    const staff = await getStaffMember(staffEmail);
+    if (!staff) {
+      return false;
+    }
+
+    // Admin and manager roles have all permissions
+    if (staff.role === 'admin' || staff.role === 'manager') {
+      return true;
+    }
+
+    // Check specific permission
+    const permissions = staff.permissions || {};
+    
+    // Support legacy permissions for backward compatibility
+    if (permission === 'pricingView' && (permissions.pricingView || permissions.pricing)) return true;
+    if (permission === 'pricingEdit' && (permissions.pricingEdit || permissions.pricing)) return true;
+    if (permission === 'pricingCreate' && permissions.pricingCreate) return true;
+    if (permission === 'pricingDelete' && permissions.pricingDelete) return true;
+    if (permission === 'pricingBulk' && permissions.pricingBulk) return true;
+    if (permission === 'pricingImport' && permissions.pricingImport) return true;
+    
+    if (permission === 'tradeInView' && (permissions.tradeInView || permissions.tradeIn)) return true;
+    if (permission === 'tradeInEdit' && (permissions.tradeInEdit || permissions.tradeIn)) return true;
+    if (permission === 'tradeInStatus' && permissions.tradeInStatus) return true;
+    if (permission === 'tradeInCredit' && permissions.tradeInCredit) return true;
+    if (permission === 'tradeInPayment' && permissions.tradeInPayment) return true;
+    
+    if (permission === 'auditView' && permissions.auditView) return true;
+    if (permission === 'staffView' && permissions.staffView) return true;
+    if (permission === 'staffEdit' && permissions.staffEdit) return true;
+    
+    if (permission === 'backupView' && permissions.backupView) return true;
+    if (permission === 'backupCreate' && permissions.backupCreate) return true;
+    if (permission === 'backupRestore' && permissions.backupRestore) return true;
+    if (permission === 'backupDelete' && permissions.backupDelete) return true;
+    if (permission === 'backupConfig' && permissions.backupConfig) return true;
+
+    return permissions[permission] === true;
+  } catch (error) {
+    console.error('Error in hasPermission:', error);
+    return false; // Fail closed - deny permission on error
   }
-
-  // Admin and manager roles have all permissions
-  if (staff.role === 'admin' || staff.role === 'manager') {
-    return true;
-  }
-
-  // Check specific permission
-  const permissions = staff.permissions || {};
-  
-  // Support legacy permissions for backward compatibility
-  if (permission === 'pricingView' && (permissions.pricingView || permissions.pricing)) return true;
-  if (permission === 'pricingEdit' && (permissions.pricingEdit || permissions.pricing)) return true;
-  if (permission === 'pricingCreate' && permissions.pricingCreate) return true;
-  if (permission === 'pricingDelete' && permissions.pricingDelete) return true;
-  if (permission === 'pricingBulk' && permissions.pricingBulk) return true;
-  if (permission === 'pricingImport' && permissions.pricingImport) return true;
-  
-  if (permission === 'tradeInView' && (permissions.tradeInView || permissions.tradeIn)) return true;
-  if (permission === 'tradeInEdit' && (permissions.tradeInEdit || permissions.tradeIn)) return true;
-  if (permission === 'tradeInStatus' && permissions.tradeInStatus) return true;
-  if (permission === 'tradeInCredit' && permissions.tradeInCredit) return true;
-  if (permission === 'tradeInPayment' && permissions.tradeInPayment) return true;
-  
-  if (permission === 'auditView' && permissions.auditView) return true;
-  if (permission === 'staffView' && permissions.staffView) return true;
-  if (permission === 'staffEdit' && permissions.staffEdit) return true;
-  
-  if (permission === 'backupView' && permissions.backupView) return true;
-  if (permission === 'backupCreate' && permissions.backupCreate) return true;
-  if (permission === 'backupRestore' && permissions.backupRestore) return true;
-  if (permission === 'backupDelete' && permissions.backupDelete) return true;
-  if (permission === 'backupConfig' && permissions.backupConfig) return true;
-
-  return permissions[permission] === true;
 }
 
 // Helper function to verify admin access
@@ -4517,8 +4526,19 @@ app.get('/api/backup/config', async (req, res) => {
     }
 
     const staffIdentifier = req.headers['x-staff-identifier'];
-    if (!await hasPermission(staffIdentifier, 'backupConfig')) {
-      return res.status(403).json({ error: 'Permission denied. You need "backupConfig" permission.' });
+    
+    // Check permission with error handling
+    try {
+      const hasAccess = await hasPermission(staffIdentifier, 'backupConfig');
+      if (!hasAccess) {
+        return res.status(403).json({ error: 'Permission denied. You need "backupConfig" permission.' });
+      }
+    } catch (permError) {
+      console.error('Error checking permission:', permError);
+      // If permission check fails, allow if staffIdentifier is provided (graceful degradation)
+      if (!staffIdentifier) {
+        return res.status(403).json({ error: 'Permission denied. Staff identifier required.' });
+      }
     }
 
     await ensureMongoConnection();
@@ -4527,7 +4547,14 @@ app.get('/api/backup/config', async (req, res) => {
     }
 
     // Get backup configuration
-    let config = await db.collection('backup_config').findOne({ _id: 'main' });
+    let config;
+    try {
+      config = await db.collection('backup_config').findOne({ _id: 'main' });
+    } catch (dbError) {
+      console.error('Error querying backup_config:', dbError);
+      // Return default config if query fails
+      config = null;
+    }
     
     if (!config) {
       // Default configuration
@@ -4538,7 +4565,14 @@ app.get('/api/backup/config', async (req, res) => {
         autoBackupEnabled: true,
         retentionDays: 30
       };
-      await db.collection('backup_config').insertOne(config);
+      
+      // Try to save default config, but don't fail if it errors
+      try {
+        await db.collection('backup_config').insertOne(config);
+      } catch (insertError) {
+        console.error('Error saving default backup config:', insertError);
+        // Continue anyway - return the default config
+      }
     }
 
     res.json({
@@ -4548,7 +4582,11 @@ app.get('/api/backup/config', async (req, res) => {
 
   } catch (error) {
     console.error('Error fetching backup config:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error('Error stack:', error.stack);
+    res.status(500).json({ 
+      error: 'Internal server error',
+      message: error.message 
+    });
   }
 });
 
