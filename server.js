@@ -4163,6 +4163,280 @@ async function getChangedDocuments(collectionName, lastBackupTime) {
   return await db.collection(collectionName).find(query).toArray();
 }
 
+// ============================================
+// SHOPIFY BACKUP HELPERS
+// ============================================
+
+// Fetch all products from Shopify
+async function fetchShopifyProducts() {
+  try {
+    if (!SHOPIFY_SHOP || !SHOPIFY_ACCESS_TOKEN) {
+      return { error: 'Shopify credentials not configured' };
+    }
+
+    const products = [];
+    let hasNextPage = true;
+    let cursor = null;
+
+    while (hasNextPage) {
+      const query = cursor 
+        ? `?limit=250&since_id=${cursor}`
+        : '?limit=250';
+
+      const response = await fetch(
+        `https://${SHOPIFY_SHOP}/admin/api/2024-01/products.json${query}`,
+        {
+          headers: {
+            'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`Shopify API error: ${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      if (data.products && data.products.length > 0) {
+        products.push(...data.products);
+        cursor = data.products[data.products.length - 1].id;
+        hasNextPage = data.products.length === 250;
+      } else {
+        hasNextPage = false;
+      }
+    }
+
+    return { products, count: products.length };
+  } catch (error) {
+    console.error('Error fetching Shopify products:', error);
+    return { error: error.message, products: [], count: 0 };
+  }
+}
+
+// Fetch theme files from Shopify
+async function fetchShopifyThemes() {
+  try {
+    if (!SHOPIFY_SHOP || !SHOPIFY_ACCESS_TOKEN) {
+      return { error: 'Shopify credentials not configured' };
+    }
+
+    const response = await fetch(
+      `https://${SHOPIFY_SHOP}/admin/api/2024-01/themes.json`,
+      {
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Shopify API error: ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    const themes = data.themes || [];
+
+    // Fetch assets for each theme
+    const themesWithAssets = await Promise.all(
+      themes.map(async (theme) => {
+        try {
+          const assetsResponse = await fetch(
+            `https://${SHOPIFY_SHOP}/admin/api/2024-01/themes/${theme.id}/assets.json`,
+            {
+              headers: {
+                'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+                'Content-Type': 'application/json'
+              }
+            }
+          );
+
+          if (assetsResponse.ok) {
+            const assetsData = await assetsResponse.json();
+            theme.assets = assetsData.assets || [];
+          } else {
+            theme.assets = [];
+          }
+        } catch (error) {
+          console.error(`Error fetching assets for theme ${theme.id}:`, error);
+          theme.assets = [];
+        }
+        return theme;
+      })
+    );
+
+    return { themes: themesWithAssets, count: themesWithAssets.length };
+  } catch (error) {
+    console.error('Error fetching Shopify themes:', error);
+    return { error: error.message, themes: [], count: 0 };
+  }
+}
+
+// Fetch script tags from Shopify
+async function fetchShopifyScriptTags() {
+  try {
+    if (!SHOPIFY_SHOP || !SHOPIFY_ACCESS_TOKEN) {
+      return { error: 'Shopify credentials not configured' };
+    }
+
+    const response = await fetch(
+      `https://${SHOPIFY_SHOP}/admin/api/2024-01/script_tags.json`,
+      {
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Shopify API error: ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    return { scriptTags: data.script_tags || [], count: (data.script_tags || []).length };
+  } catch (error) {
+    console.error('Error fetching Shopify script tags:', error);
+    return { error: error.message, scriptTags: [], count: 0 };
+  }
+}
+
+// Fetch metaobjects from Shopify (GraphQL)
+async function fetchShopifyMetaobjects() {
+  try {
+    if (!SHOPIFY_SHOP || !SHOPIFY_ACCESS_TOKEN) {
+      return { error: 'Shopify credentials not configured' };
+    }
+
+    const query = `
+      {
+        metaobjects(first: 250) {
+          edges {
+            node {
+              id
+              type
+              handle
+              fields {
+                key
+                value
+                type
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const response = await fetch(
+      `https://${SHOPIFY_SHOP}/admin/api/2024-01/graphql.json`,
+      {
+        method: 'POST',
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ query })
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Shopify API error: ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    const metaobjects = data.data?.metaobjects?.edges?.map(edge => edge.node) || [];
+    return { metaobjects, count: metaobjects.length };
+  } catch (error) {
+    console.error('Error fetching Shopify metaobjects:', error);
+    return { error: error.message, metaobjects: [], count: 0 };
+  }
+}
+
+// Fetch blog posts and articles from Shopify
+async function fetchShopifyContent() {
+  try {
+    if (!SHOPIFY_SHOP || !SHOPIFY_ACCESS_TOKEN) {
+      return { error: 'Shopify credentials not configured' };
+    }
+
+    // Fetch blogs
+    const blogsResponse = await fetch(
+      `https://${SHOPIFY_SHOP}/admin/api/2024-01/blogs.json`,
+      {
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    const blogs = blogsResponse.ok ? (await blogsResponse.json()).blogs || [] : [];
+
+    // Fetch articles for each blog
+    const blogsWithArticles = await Promise.all(
+      blogs.map(async (blog) => {
+        try {
+          const articlesResponse = await fetch(
+            `https://${SHOPIFY_SHOP}/admin/api/2024-01/blogs/${blog.id}/articles.json`,
+            {
+              headers: {
+                'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+                'Content-Type': 'application/json'
+              }
+            }
+          );
+
+          if (articlesResponse.ok) {
+            const articlesData = await articlesResponse.json();
+            blog.articles = articlesData.articles || [];
+          } else {
+            blog.articles = [];
+          }
+        } catch (error) {
+          console.error(`Error fetching articles for blog ${blog.id}:`, error);
+          blog.articles = [];
+        }
+        return blog;
+      })
+    );
+
+    return { blogs: blogsWithArticles, count: blogsWithArticles.length };
+  } catch (error) {
+    console.error('Error fetching Shopify content:', error);
+    return { error: error.message, blogs: [], count: 0 };
+  }
+}
+
+// Fetch files from Shopify
+async function fetchShopifyFiles() {
+  try {
+    if (!SHOPIFY_SHOP || !SHOPIFY_ACCESS_TOKEN) {
+      return { error: 'Shopify credentials not configured' };
+    }
+
+    const response = await fetch(
+      `https://${SHOPIFY_SHOP}/admin/api/2024-01/files.json`,
+      {
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Shopify API error: ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    return { files: data.files || [], count: (data.files || []).length };
+  } catch (error) {
+    console.error('Error fetching Shopify files:', error);
+    return { error: error.message, files: [], count: 0 };
+  }
+}
+
 // Create backup (full or incremental)
 app.post('/api/backup/create', async (req, res) => {
   try {
@@ -4204,14 +4478,18 @@ app.post('/api/backup/create', async (req, res) => {
       }
     }
 
+    const { includeShopify = true } = req.body;
+    
     const collectionsToBackup = ['products', 'submissions', 'staff_members', 'audit_logs'];
     const backupData = {
       type: backupType,
       createdAt: new Date().toISOString(),
       createdBy: staffIdentifier,
-      collections: []
+      collections: [],
+      shopify: {}
     };
 
+    // Backup MongoDB collections
     for (const collectionName of collectionsToBackup) {
       let documents;
       
@@ -4239,6 +4517,60 @@ app.post('/api/backup/create', async (req, res) => {
       });
     }
 
+    // Backup Shopify data (only on full backups or if explicitly requested)
+    if (includeShopify && (backupType === 'full' || req.body.forceShopify)) {
+      console.log('🔄 Starting Shopify data backup...');
+      
+      try {
+        // Fetch all Shopify data in parallel
+        const [productsData, themesData, scriptTagsData, metaobjectsData, contentData, filesData] = await Promise.all([
+          fetchShopifyProducts(),
+          fetchShopifyThemes(),
+          fetchShopifyScriptTags(),
+          fetchShopifyMetaobjects(),
+          fetchShopifyContent(),
+          fetchShopifyFiles()
+        ]);
+
+        backupData.shopify = {
+          products: productsData.products || [],
+          productsCount: productsData.count || 0,
+          productsError: productsData.error || null,
+          themes: themesData.themes || [],
+          themesCount: themesData.count || 0,
+          themesError: themesData.error || null,
+          scriptTags: scriptTagsData.scriptTags || [],
+          scriptTagsCount: scriptTagsData.count || 0,
+          scriptTagsError: scriptTagsData.error || null,
+          metaobjects: metaobjectsData.metaobjects || [],
+          metaobjectsCount: metaobjectsData.count || 0,
+          metaobjectsError: metaobjectsData.error || null,
+          blogs: contentData.blogs || [],
+          blogsCount: contentData.count || 0,
+          blogsError: contentData.error || null,
+          files: filesData.files || [],
+          filesCount: filesData.count || 0,
+          filesError: filesData.error || null,
+          backedUpAt: new Date().toISOString()
+        };
+
+        console.log('✅ Shopify backup completed:', {
+          products: backupData.shopify.productsCount,
+          themes: backupData.shopify.themesCount,
+          scriptTags: backupData.shopify.scriptTagsCount,
+          metaobjects: backupData.shopify.metaobjectsCount,
+          blogs: backupData.shopify.blogsCount,
+          files: backupData.shopify.filesCount
+        });
+      } catch (error) {
+        console.error('❌ Error during Shopify backup:', error);
+        backupData.shopify = {
+          error: error.message,
+          backedUpAt: new Date().toISOString()
+        };
+      }
+    }
+
     // Calculate total size
     const totalSize = JSON.stringify(backupData).length;
     backupData.size = totalSize;
@@ -4246,6 +4578,17 @@ app.post('/api/backup/create', async (req, res) => {
 
     // Save backup
     const result = await db.collection('backups').insertOne(backupData);
+
+    // Calculate MongoDB and Shopify counts
+    const mongoCount = backupData.collections.reduce((sum, col) => sum + col.count, 0);
+    const shopifyCount = backupData.shopify && Object.keys(backupData.shopify).length > 0
+      ? (backupData.shopify.productsCount || 0) +
+        (backupData.shopify.themesCount || 0) +
+        (backupData.shopify.scriptTagsCount || 0) +
+        (backupData.shopify.metaobjectsCount || 0) +
+        (backupData.shopify.blogsCount || 0) +
+        (backupData.shopify.filesCount || 0)
+      : 0;
 
     // Log audit
     await logAudit({
@@ -4257,11 +4600,12 @@ app.post('/api/backup/create', async (req, res) => {
         field: 'type',
         old: null,
         new: backupType,
-        description: `Created ${backupType} backup with ${backupData.collections.reduce((sum, col) => sum + col.count, 0)} total records`
+        description: `Created ${backupType} backup with ${mongoCount} MongoDB records and ${shopifyCount} Shopify items`
       }],
       metadata: {
         collections: collectionsToBackup,
-        totalSize: totalSize
+        totalSize: totalSize,
+        shopifyIncluded: includeShopify && (backupType === 'full' || req.body.forceShopify)
       }
     });
 
@@ -4276,7 +4620,16 @@ app.post('/api/backup/create', async (req, res) => {
         collections: backupData.collections.map(col => ({
           name: col.name,
           count: col.count
-        }))
+        })),
+        shopify: backupData.shopify && Object.keys(backupData.shopify).length > 0 ? {
+          productsCount: backupData.shopify.productsCount || 0,
+          themesCount: backupData.shopify.themesCount || 0,
+          scriptTagsCount: backupData.shopify.scriptTagsCount || 0,
+          metaobjectsCount: backupData.shopify.metaobjectsCount || 0,
+          blogsCount: backupData.shopify.blogsCount || 0,
+          filesCount: backupData.shopify.filesCount || 0,
+          hasErrors: !!(backupData.shopify.productsError || backupData.shopify.themesError || backupData.shopify.scriptTagsError || backupData.shopify.metaobjectsError || backupData.shopify.blogsError || backupData.shopify.filesError)
+        } : null
       }
     });
 
@@ -4329,7 +4682,16 @@ app.get('/api/backup/list', async (req, res) => {
       collections: backup.collections.map(col => ({
         name: col.name,
         count: col.count
-      }))
+      })),
+      shopify: backup.shopify && Object.keys(backup.shopify).length > 0 ? {
+        productsCount: backup.shopify.productsCount || 0,
+        themesCount: backup.shopify.themesCount || 0,
+        scriptTagsCount: backup.shopify.scriptTagsCount || 0,
+        metaobjectsCount: backup.shopify.metaobjectsCount || 0,
+        blogsCount: backup.shopify.blogsCount || 0,
+        filesCount: backup.shopify.filesCount || 0,
+        hasErrors: !!(backup.shopify.productsError || backup.shopify.themesError || backup.shopify.scriptTagsError || backup.shopify.metaobjectsError || backup.shopify.blogsError || backup.shopify.filesError)
+      } : null
     }));
 
     res.json({
@@ -4416,6 +4778,8 @@ app.post('/api/backup/restore', async (req, res) => {
       ? backup.collections.filter(col => collections.includes(col.name))
       : backup.collections;
 
+    const { restoreShopify = false } = req.body;
+
     // Restore each collection
     const restoredCollections = [];
     for (const collectionData of collectionsToRestore) {
@@ -4435,6 +4799,39 @@ app.post('/api/backup/restore', async (req, res) => {
       });
     }
 
+    // Restore Shopify data if requested and available
+    const shopifyRestoreResult = {
+      restored: false,
+      message: 'Shopify restore skipped',
+      details: {}
+    };
+
+    if (restoreShopify && backup.shopify && Object.keys(backup.shopify).length > 0) {
+      if (!SHOPIFY_SHOP || !SHOPIFY_ACCESS_TOKEN) {
+        shopifyRestoreResult.message = 'Shopify credentials not configured';
+      } else {
+        try {
+          console.log('🔄 Starting Shopify data restore...');
+          // Note: Full Shopify restore requires write permissions and is complex
+          // For now, we'll log that Shopify data exists but restoration requires manual process
+          // or separate endpoint with proper write scopes
+          shopifyRestoreResult.restored = false;
+          shopifyRestoreResult.message = 'Shopify restore requires write permissions. Please restore manually or use separate restore endpoint.';
+          shopifyRestoreResult.details = {
+            productsCount: backup.shopify.productsCount || 0,
+            themesCount: backup.shopify.themesCount || 0,
+            scriptTagsCount: backup.shopify.scriptTagsCount || 0,
+            metaobjectsCount: backup.shopify.metaobjectsCount || 0,
+            blogsCount: backup.shopify.blogsCount || 0,
+            filesCount: backup.shopify.filesCount || 0
+          };
+        } catch (error) {
+          console.error('Error during Shopify restore:', error);
+          shopifyRestoreResult.message = `Shopify restore error: ${error.message}`;
+        }
+      }
+    }
+
     // Log audit
     await logAudit({
       action: 'restore_backup',
@@ -4445,18 +4842,20 @@ app.post('/api/backup/restore', async (req, res) => {
         field: 'restored',
         old: null,
         new: 'completed',
-        description: `Restored backup from ${new Date(backup.createdAt).toLocaleString()}. Restored ${restoredCollections.length} collections.`
+        description: `Restored backup from ${new Date(backup.createdAt).toLocaleString()}. Restored ${restoredCollections.length} MongoDB collections. ${shopifyRestoreResult.restored ? 'Shopify data restored.' : 'Shopify data not restored (requires write permissions).'}`
       }],
       metadata: {
         backupType: backup.type,
-        collections: restoredCollections.map(col => col.name)
+        collections: restoredCollections.map(col => col.name),
+        shopifyRestored: shopifyRestoreResult.restored
       }
     });
 
     res.json({
       success: true,
       message: 'Backup restored successfully',
-      restoredCollections: restoredCollections
+      restoredCollections: restoredCollections,
+      shopify: shopifyRestoreResult
     });
 
   } catch (error) {
