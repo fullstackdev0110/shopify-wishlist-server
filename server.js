@@ -7,6 +7,10 @@ const path = require('path');
 const XLSX = require('xlsx');
 const app = express();
 
+// Backup scheduler
+let backupScheduler = null;
+let lastBackupCheck = null;
+
 // Enable CORS for Shopify store - MUST BE BEFORE OTHER MIDDLEWARE
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*'); // Allow all origins
@@ -5061,6 +5065,13 @@ app.put('/api/backup/config', async (req, res) => {
 
     await db.collection('backup_config').replaceOne({ _id: 'main' }, config, { upsert: true });
 
+    // Restart scheduler if auto backup is enabled
+    if (autoBackupEnabled) {
+      startBackupScheduler();
+    } else {
+      stopBackupScheduler();
+    }
+
     // Log audit
     await logAudit({
       action: 'update_backup_config',
@@ -5086,9 +5097,286 @@ app.put('/api/backup/config', async (req, res) => {
   }
 });
 
+// Auto backup scheduler functions
+async function performAutoBackup(type = 'incremental') {
+  try {
+    await ensureMongoConnection();
+    if (!db) {
+      console.error('❌ Cannot perform auto backup: Database not connected');
+      return;
+    }
+
+    // Get backup config
+    const config = await db.collection('backup_config').findOne({ _id: 'main' });
+    if (!config || !config.autoBackupEnabled) {
+      console.log('⏸️ Auto backup is disabled');
+      return;
+    }
+
+    // Use system identifier for auto backups
+    const systemIdentifier = 'system@auto-backup';
+
+    // Determine backup type
+    let backupType = type;
+    if (type === 'incremental') {
+      const lastFullBackup = await db.collection('backups').findOne(
+        { type: 'full' },
+        { sort: { createdAt: -1 } }
+      );
+      
+      if (!lastFullBackup) {
+        backupType = 'full'; // First backup must be full
+      } else {
+        const daysSinceFullBackup = (Date.now() - new Date(lastFullBackup.createdAt).getTime()) / (1000 * 60 * 60 * 24);
+        const fullBackupInterval = config.fullBackupFrequency === 'daily' ? 1 : 7;
+        if (daysSinceFullBackup >= fullBackupInterval) {
+          backupType = 'full';
+        }
+      }
+    }
+
+    console.log(`🔄 Starting auto ${backupType} backup...`);
+
+    const collectionsToBackup = ['products', 'submissions', 'staff_members', 'audit_logs'];
+    const backupData = {
+      type: backupType,
+      createdAt: new Date().toISOString(),
+      createdBy: systemIdentifier,
+      collections: [],
+      shopify: {}
+    };
+
+    // Backup MongoDB collections
+    for (const collectionName of collectionsToBackup) {
+      let documents;
+      
+      if (backupType === 'full') {
+        documents = await db.collection(collectionName).find({}).toArray();
+      } else {
+        const lastBackup = await db.collection('backups').findOne(
+          { 
+            'collections.name': collectionName,
+            type: 'full'
+          },
+          { sort: { createdAt: -1 } }
+        );
+        
+        const lastFullBackupTime = lastBackup ? new Date(lastBackup.createdAt) : null;
+        documents = await getChangedDocuments(collectionName, lastFullBackupTime);
+      }
+
+      backupData.collections.push({
+        name: collectionName,
+        count: documents.length,
+        data: documents
+      });
+    }
+
+    // Backup Shopify data (only on full backups)
+    if (backupType === 'full') {
+      try {
+        const [productsData, themesData, scriptTagsData, metaobjectsData, contentData] = await Promise.all([
+          fetchShopifyProducts(),
+          fetchShopifyThemes(),
+          fetchShopifyScriptTags(),
+          fetchShopifyMetaobjects(),
+          fetchShopifyContent()
+        ]);
+
+        backupData.shopify = {
+          products: productsData.products || [],
+          productsCount: productsData.count || 0,
+          productsError: productsData.error || null,
+          themes: themesData.themes || [],
+          themesCount: themesData.count || 0,
+          themesError: themesData.error || null,
+          scriptTags: scriptTagsData.scriptTags || [],
+          scriptTagsCount: scriptTagsData.count || 0,
+          scriptTagsError: scriptTagsData.error || null,
+          metaobjects: metaobjectsData.metaobjects || [],
+          metaobjectsCount: metaobjectsData.count || 0,
+          metaobjectsError: metaobjectsData.error || null,
+          blogs: contentData.blogs || [],
+          blogsCount: contentData.count || 0,
+          blogsError: contentData.error || null,
+          backedUpAt: new Date().toISOString()
+        };
+      } catch (error) {
+        console.error('❌ Error during Shopify backup:', error);
+        backupData.shopify = {
+          error: error.message,
+          backedUpAt: new Date().toISOString()
+        };
+      }
+    }
+
+    // Calculate total size
+    const totalSize = JSON.stringify(backupData).length;
+    backupData.size = totalSize;
+    backupData.sizeFormatted = formatBytes(totalSize);
+
+    // Save backup
+    await db.collection('backups').insertOne(backupData);
+
+    const mongoCount = backupData.collections.reduce((sum, col) => sum + col.count, 0);
+    const shopifyCount = backupData.shopify && Object.keys(backupData.shopify).length > 0
+      ? (backupData.shopify.productsCount || 0) +
+        (backupData.shopify.themesCount || 0) +
+        (backupData.shopify.scriptTagsCount || 0) +
+        (backupData.shopify.metaobjectsCount || 0) +
+        (backupData.shopify.blogsCount || 0)
+      : 0;
+
+    console.log(`✅ Auto ${backupType} backup completed: ${mongoCount} MongoDB records, ${shopifyCount} Shopify items`);
+
+    // Cleanup old backups based on retention policy
+    if (config.retentionDays) {
+      const cutoffDate = new Date();
+      cutoffDate.setDate(cutoffDate.getDate() - config.retentionDays);
+      
+      const deleteResult = await db.collection('backups').deleteMany({
+        createdAt: { $lt: cutoffDate.toISOString() }
+      });
+      
+      if (deleteResult.deletedCount > 0) {
+        console.log(`🗑️ Cleaned up ${deleteResult.deletedCount} old backups (older than ${config.retentionDays} days)`);
+      }
+    }
+
+  } catch (error) {
+    console.error('❌ Error performing auto backup:', error);
+  }
+}
+
+function getIntervalMs(frequency) {
+  const intervals = {
+    'hourly': 60 * 60 * 1000,
+    'every2hours': 2 * 60 * 60 * 1000,
+    'every4hours': 4 * 60 * 60 * 1000,
+    'daily': 24 * 60 * 60 * 1000,
+    'weekly': 7 * 24 * 60 * 60 * 1000
+  };
+  return intervals[frequency] || intervals.hourly;
+}
+
+async function startBackupScheduler() {
+  // Stop existing scheduler if running
+  stopBackupScheduler();
+
+  try {
+    await ensureMongoConnection();
+    if (!db) {
+      console.error('❌ Cannot start backup scheduler: Database not connected');
+      return;
+    }
+
+    const config = await db.collection('backup_config').findOne({ _id: 'main' });
+    if (!config || !config.autoBackupEnabled) {
+      console.log('⏸️ Auto backup is disabled, scheduler not started');
+      return;
+    }
+
+    const intervalMs = getIntervalMs(config.incrementalBackupFrequency);
+    console.log(`🔄 Starting backup scheduler: ${config.incrementalBackupFrequency} (${intervalMs / 1000 / 60} minutes)`);
+
+    // Perform initial backup check
+    performAutoBackup('incremental');
+
+    // Schedule periodic backups
+    backupScheduler = setInterval(async () => {
+      await performAutoBackup('incremental');
+    }, intervalMs);
+
+    lastBackupCheck = new Date();
+  } catch (error) {
+    console.error('❌ Error starting backup scheduler:', error);
+  }
+}
+
+function stopBackupScheduler() {
+  if (backupScheduler) {
+    clearInterval(backupScheduler);
+    backupScheduler = null;
+    console.log('⏹️ Backup scheduler stopped');
+  }
+}
+
+// Initialize backup scheduler on server start
+async function initializeBackupScheduler() {
+  try {
+    await ensureMongoConnection();
+    if (!db) {
+      console.log('⏳ Waiting for database connection before starting backup scheduler...');
+      // Retry after a delay
+      setTimeout(initializeBackupScheduler, 5000);
+      return;
+    }
+
+    const config = await db.collection('backup_config').findOne({ _id: 'main' });
+    if (config && config.autoBackupEnabled) {
+      startBackupScheduler();
+    } else {
+      console.log('⏸️ Auto backup is disabled in configuration');
+    }
+  } catch (error) {
+    console.error('❌ Error initializing backup scheduler:', error);
+  }
+}
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
+});
+
+// Manual trigger endpoint for auto backup (for Vercel Cron Jobs)
+app.post('/api/backup/auto', async (req, res) => {
+  try {
+    // Allow Vercel Cron Jobs (they send x-vercel-cron header) or API key
+    const authHeader = req.headers['x-api-key'];
+    const isVercelCron = req.headers['x-vercel-cron'] === '1';
+    
+    if (!isVercelCron && authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database not connected' });
+    }
+
+    // Get backup config
+    const config = await db.collection('backup_config').findOne({ _id: 'main' });
+    if (!config || !config.autoBackupEnabled) {
+      return res.json({ success: true, message: 'Auto backup is disabled, skipping' });
+    }
+
+    // Check if enough time has passed since last backup based on user's frequency setting
+    const lastBackup = await db.collection('backups').findOne(
+      {},
+      { sort: { createdAt: -1 } }
+    );
+
+    if (lastBackup) {
+      const timeSinceLastBackup = Date.now() - new Date(lastBackup.createdAt).getTime();
+      const requiredInterval = getIntervalMs(config.incrementalBackupFrequency);
+      
+      if (timeSinceLastBackup < requiredInterval) {
+        const minutesRemaining = Math.ceil((requiredInterval - timeSinceLastBackup) / 1000 / 60);
+        return res.json({ 
+          success: true, 
+          message: `Skipping backup - next backup in ${minutesRemaining} minutes`,
+          skipped: true
+        });
+      }
+    }
+
+    // Perform backup
+    await performAutoBackup('incremental');
+    res.json({ success: true, message: 'Auto backup completed' });
+  } catch (error) {
+    console.error('Error triggering auto backup:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
 });
 
 // Root endpoint (for testing)
@@ -5109,8 +5397,13 @@ module.exports = app;
 // for local development
 if (require.main === module) {
   const PORT = process.env.PORT || 3000;
-  app.listen(PORT, () => {
+  app.listen(PORT, async () => {
     console.log(`Server running on port ${PORT}`);
+    // Initialize backup scheduler after server starts
+    setTimeout(initializeBackupScheduler, 2000);
   });
+} else {
+  // For serverless (Vercel), initialize scheduler after a delay
+  setTimeout(initializeBackupScheduler, 3000);
 }
 
