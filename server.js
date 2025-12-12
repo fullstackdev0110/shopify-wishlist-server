@@ -1795,6 +1795,12 @@ async function hasPermission(staffEmail, permission) {
   if (permission === 'auditView' && permissions.auditView) return true;
   if (permission === 'staffView' && permissions.staffView) return true;
   if (permission === 'staffEdit' && permissions.staffEdit) return true;
+  
+  if (permission === 'backupView' && permissions.backupView) return true;
+  if (permission === 'backupCreate' && permissions.backupCreate) return true;
+  if (permission === 'backupRestore' && permissions.backupRestore) return true;
+  if (permission === 'backupDelete' && permissions.backupDelete) return true;
+  if (permission === 'backupConfig' && permissions.backupConfig) return true;
 
   return permissions[permission] === true;
 }
@@ -1934,18 +1940,28 @@ app.post('/api/staff/send-verification-code', async (req, res) => {
       return res.status(500).json({ error: 'Database connection failed' });
     }
 
+    // Check if any admins exist (bootstrap mode)
+    const adminCount = await db.collection('staff_members').countDocuments({ 
+      role: { $in: ['admin', 'manager'] },
+      active: true 
+    });
+
     // Check if email exists in staff members
     const staff = await db.collection('staff_members').findOne({ 
       email: email.trim().toLowerCase(),
       active: true 
     });
 
-    if (!staff) {
+    // If not in bootstrap mode and email doesn't exist, deny
+    if (!staff && adminCount > 0) {
       return res.status(404).json({ 
         success: false,
         error: 'Email not found in staff database. Please contact administrator.' 
       });
     }
+
+    // In bootstrap mode, allow sending code even if email doesn't exist
+    const isBootstrapMode = adminCount === 0;
 
     // Generate 6-digit verification code
     const verificationCode = Math.floor(100000 + Math.random() * 900000).toString();
@@ -1967,20 +1983,37 @@ app.post('/api/staff/send-verification-code', async (req, res) => {
 
     // Send verification code via email
     try {
-      await transporter.sendMail({
-        from: SMTP_FROM,
-        to: email.trim(),
-        subject: 'Admin Access Verification Code',
-        html: `
+      const displayName = staff ? (staff.name || email) : email;
+      const emailSubject = isBootstrapMode 
+        ? 'Admin Setup - Verification Code' 
+        : 'Admin Access Verification Code';
+      const emailBody = isBootstrapMode
+        ? `
+          <h2>Admin Setup - Verification Code</h2>
+          <p>Hello,</p>
+          <p>You are setting up the first admin account. Use the verification code below to complete the setup:</p>
+          <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0; text-align: center;">
+            <p style="font-size: 32px; font-weight: bold; letter-spacing: 4px; color: #1a73e8; margin: 0;">${verificationCode}</p>
+          </div>
+          <p><strong>This code will expire in 10 minutes.</strong></p>
+          <p>After verification, you will be able to create your admin account.</p>
+        `
+        : `
           <h2>Admin Access Verification</h2>
-          <p>Hello ${staff.name || email},</p>
+          <p>Hello ${displayName},</p>
           <p>You requested access to the admin panel. Use the verification code below to complete your login:</p>
           <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0; text-align: center;">
             <p style="font-size: 32px; font-weight: bold; letter-spacing: 4px; color: #1a73e8; margin: 0;">${verificationCode}</p>
           </div>
           <p><strong>This code will expire in 10 minutes.</strong></p>
           <p>If you didn't request this code, please ignore this email or contact your administrator.</p>
-        `
+        `;
+
+      await transporter.sendMail({
+        from: SMTP_FROM,
+        to: email.trim(),
+        subject: emailSubject,
+        html: emailBody
       });
     } catch (emailError) {
       console.error('Error sending verification email:', emailError);
@@ -1993,7 +2026,8 @@ app.post('/api/staff/send-verification-code', async (req, res) => {
     res.json({
       success: true,
       message: 'Verification code sent to your email',
-      expiresIn: 600 // 10 minutes in seconds
+      expiresIn: 600, // 10 minutes in seconds
+      isBootstrapMode: isBootstrapMode
     });
 
   } catch (error) {
@@ -2067,11 +2101,33 @@ app.post('/api/staff/verify-code', async (req, res) => {
       });
     }
 
+    // Check if any admins exist (bootstrap mode)
+    const adminCount = await db.collection('staff_members').countDocuments({ 
+      role: { $in: ['admin', 'manager'] },
+      active: true 
+    });
+    const isBootstrapMode = adminCount === 0;
+
     // Code is valid - get staff info
     const staff = await db.collection('staff_members').findOne({ 
       email: email.trim().toLowerCase(),
       active: true 
     });
+
+    // In bootstrap mode, if staff doesn't exist, allow creating first admin
+    if (!staff && isBootstrapMode) {
+      // Delete used verification code
+      await db.collection('verification_codes').deleteOne({ email: email.trim().toLowerCase() });
+      
+      // Return success with bootstrap flag - frontend will create the admin
+      return res.json({
+        success: true,
+        message: 'Email verified successfully. You can now create your admin account.',
+        isBootstrapMode: true,
+        email: email.trim().toLowerCase(),
+        needsAccountCreation: true
+      });
+    }
 
     if (!staff) {
       return res.status(404).json({
@@ -2094,7 +2150,8 @@ app.post('/api/staff/verify-code', async (req, res) => {
         permissions: staff.permissions
       },
       isAdmin: staff.role === 'admin' || staff.role === 'manager',
-      hasAccess: true // All active staff can access pricing/trade-in
+      hasAccess: true, // All active staff can access pricing/trade-in
+      isBootstrapMode: false
     });
 
   } catch (error) {
@@ -4058,6 +4115,500 @@ app.post('/api/trade-in/:id/issue-cash-payment', async (req, res) => {
   }
 });
 
+// ============================================
+// BACKUP SYSTEM
+// ============================================
+
+// Helper function to get last backup timestamp for a collection
+async function getLastBackupTimestamp(collectionName, backupType) {
+  try {
+    const lastBackup = await db.collection('backups').findOne(
+      { 
+        'collections.name': collectionName,
+        type: backupType
+      },
+      { sort: { createdAt: -1 } }
+    );
+    return lastBackup ? new Date(lastBackup.createdAt) : null;
+  } catch (error) {
+    console.error('Error getting last backup timestamp:', error);
+    return null;
+  }
+}
+
+// Helper function to get changed documents since last backup
+async function getChangedDocuments(collectionName, lastBackupTime) {
+  if (!lastBackupTime) {
+    // Full backup - get all documents
+    return await db.collection(collectionName).find({}).toArray();
+  }
+  
+  // Incremental backup - get only changed documents
+  const query = {
+    $or: [
+      { createdAt: { $gte: lastBackupTime } },
+      { updatedAt: { $gte: lastBackupTime } }
+    ]
+  };
+  
+  return await db.collection(collectionName).find(query).toArray();
+}
+
+// Create backup (full or incremental)
+app.post('/api/backup/create', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const staffIdentifier = req.headers['x-staff-identifier'];
+    if (!await hasPermission(staffIdentifier, 'backupCreate')) {
+      return res.status(403).json({ error: 'Permission denied. You need "backupCreate" permission.' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    const { type = 'manual', forceFull = false } = req.body;
+    
+    // Determine backup type
+    let backupType = 'incremental';
+    if (forceFull || type === 'full' || type === 'manual') {
+      backupType = 'full';
+    } else {
+      // Check if we need a full backup (weekly)
+      const lastFullBackup = await db.collection('backups').findOne(
+        { type: 'full' },
+        { sort: { createdAt: -1 } }
+      );
+      
+      if (!lastFullBackup) {
+        backupType = 'full'; // First backup must be full
+      } else {
+        const daysSinceFullBackup = (Date.now() - new Date(lastFullBackup.createdAt).getTime()) / (1000 * 60 * 60 * 24);
+        if (daysSinceFullBackup >= 7) {
+          backupType = 'full'; // Weekly full backup
+        }
+      }
+    }
+
+    const collectionsToBackup = ['products', 'submissions', 'staff_members', 'audit_logs'];
+    const backupData = {
+      type: backupType,
+      createdAt: new Date().toISOString(),
+      createdBy: staffIdentifier,
+      collections: []
+    };
+
+    for (const collectionName of collectionsToBackup) {
+      let documents;
+      
+      if (backupType === 'full') {
+        // Full backup - get all documents
+        documents = await db.collection(collectionName).find({}).toArray();
+      } else {
+        // Incremental backup - get only changed documents
+        const lastBackup = await db.collection('backups').findOne(
+          { 
+            'collections.name': collectionName,
+            type: 'full'
+          },
+          { sort: { createdAt: -1 } }
+        );
+        
+        const lastFullBackupTime = lastBackup ? new Date(lastBackup.createdAt) : null;
+        documents = await getChangedDocuments(collectionName, lastFullBackupTime);
+      }
+
+      backupData.collections.push({
+        name: collectionName,
+        count: documents.length,
+        data: documents
+      });
+    }
+
+    // Calculate total size
+    const totalSize = JSON.stringify(backupData).length;
+    backupData.size = totalSize;
+    backupData.sizeFormatted = formatBytes(totalSize);
+
+    // Save backup
+    const result = await db.collection('backups').insertOne(backupData);
+
+    // Log audit
+    await logAudit({
+      action: 'create_backup',
+      resourceType: 'backup',
+      resourceId: result.insertedId.toString(),
+      staffIdentifier: staffIdentifier,
+      changes: [{
+        field: 'type',
+        old: null,
+        new: backupType,
+        description: `Created ${backupType} backup with ${backupData.collections.reduce((sum, col) => sum + col.count, 0)} total records`
+      }],
+      metadata: {
+        collections: collectionsToBackup,
+        totalSize: totalSize
+      }
+    });
+
+    res.json({
+      success: true,
+      backup: {
+        _id: result.insertedId.toString(),
+        type: backupType,
+        createdAt: backupData.createdAt,
+        size: totalSize,
+        sizeFormatted: backupData.sizeFormatted,
+        collections: backupData.collections.map(col => ({
+          name: col.name,
+          count: col.count
+        }))
+      }
+    });
+
+  } catch (error) {
+    console.error('Error creating backup:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Helper function to format bytes
+function formatBytes(bytes) {
+  if (bytes === 0) return '0 Bytes';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+}
+
+// Get all backups
+app.get('/api/backup/list', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const staffIdentifier = req.headers['x-staff-identifier'];
+    if (!await hasPermission(staffIdentifier, 'backupView')) {
+      return res.status(403).json({ error: 'Permission denied. You need "backupView" permission.' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    const backups = await db.collection('backups')
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    // Format backups (exclude full data for list view)
+    const formattedBackups = backups.map(backup => ({
+      _id: backup._id.toString(),
+      type: backup.type,
+      createdAt: backup.createdAt,
+      createdBy: backup.createdBy,
+      size: backup.size || 0,
+      sizeFormatted: backup.sizeFormatted || formatBytes(backup.size || 0),
+      collections: backup.collections.map(col => ({
+        name: col.name,
+        count: col.count
+      }))
+    }));
+
+    res.json({
+      success: true,
+      backups: formattedBackups,
+      count: formattedBackups.length
+    });
+
+  } catch (error) {
+    console.error('Error fetching backups:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Get backup details
+app.get('/api/backup/:id', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const staffIdentifier = req.headers['x-staff-identifier'];
+    if (!await hasPermission(staffIdentifier, 'backupView')) {
+      return res.status(403).json({ error: 'Permission denied. You need "backupView" permission.' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    const { id } = req.params;
+    const backup = await db.collection('backups').findOne({ _id: new ObjectId(id) });
+
+    if (!backup) {
+      return res.status(404).json({ error: 'Backup not found' });
+    }
+
+    res.json({
+      success: true,
+      backup: backup
+    });
+
+  } catch (error) {
+    console.error('Error fetching backup:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Restore from backup
+app.post('/api/backup/restore', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const staffIdentifier = req.headers['x-staff-identifier'];
+    if (!await hasPermission(staffIdentifier, 'backupRestore')) {
+      return res.status(403).json({ error: 'Permission denied. You need "backupRestore" permission.' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    const { backupId, collections = [] } = req.body;
+
+    if (!backupId) {
+      return res.status(400).json({ error: 'Backup ID is required' });
+    }
+
+    // Get backup
+    const backup = await db.collection('backups').findOne({ _id: new ObjectId(backupId) });
+
+    if (!backup) {
+      return res.status(404).json({ error: 'Backup not found' });
+    }
+
+    // If specific collections requested, restore only those
+    const collectionsToRestore = collections.length > 0 
+      ? backup.collections.filter(col => collections.includes(col.name))
+      : backup.collections;
+
+    // Restore each collection
+    const restoredCollections = [];
+    for (const collectionData of collectionsToRestore) {
+      const collectionName = collectionData.name;
+      
+      // Clear existing data (optional - could merge instead)
+      await db.collection(collectionName).deleteMany({});
+      
+      // Insert backup data
+      if (collectionData.data && collectionData.data.length > 0) {
+        await db.collection(collectionName).insertMany(collectionData.data);
+      }
+      
+      restoredCollections.push({
+        name: collectionName,
+        count: collectionData.count
+      });
+    }
+
+    // Log audit
+    await logAudit({
+      action: 'restore_backup',
+      resourceType: 'backup',
+      resourceId: backupId,
+      staffIdentifier: staffIdentifier,
+      changes: [{
+        field: 'restored',
+        old: null,
+        new: 'completed',
+        description: `Restored backup from ${new Date(backup.createdAt).toLocaleString()}. Restored ${restoredCollections.length} collections.`
+      }],
+      metadata: {
+        backupType: backup.type,
+        collections: restoredCollections.map(col => col.name)
+      }
+    });
+
+    res.json({
+      success: true,
+      message: 'Backup restored successfully',
+      restoredCollections: restoredCollections
+    });
+
+  } catch (error) {
+    console.error('Error restoring backup:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Delete backup
+app.delete('/api/backup/:id', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const staffIdentifier = req.headers['x-staff-identifier'];
+    if (!await hasPermission(staffIdentifier, 'backupDelete')) {
+      return res.status(403).json({ error: 'Permission denied. You need "backupDelete" permission.' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    const { id } = req.params;
+    const backup = await db.collection('backups').findOne({ _id: new ObjectId(id) });
+
+    if (!backup) {
+      return res.status(404).json({ error: 'Backup not found' });
+    }
+
+    await db.collection('backups').deleteOne({ _id: new ObjectId(id) });
+
+    // Log audit
+    await logAudit({
+      action: 'delete_backup',
+      resourceType: 'backup',
+      resourceId: id,
+      staffIdentifier: staffIdentifier,
+      changes: [{
+        field: 'status',
+        old: 'active',
+        new: 'deleted',
+        description: `Deleted backup from ${new Date(backup.createdAt).toLocaleString()} (${backup.type})`
+      }]
+    });
+
+    res.json({
+      success: true,
+      message: 'Backup deleted successfully'
+    });
+
+  } catch (error) {
+    console.error('Error deleting backup:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Get backup configuration
+app.get('/api/backup/config', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const staffIdentifier = req.headers['x-staff-identifier'];
+    if (!await hasPermission(staffIdentifier, 'backupConfig')) {
+      return res.status(403).json({ error: 'Permission denied. You need "backupConfig" permission.' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    // Get backup configuration
+    let config = await db.collection('backup_config').findOne({ _id: 'main' });
+    
+    if (!config) {
+      // Default configuration
+      config = {
+        _id: 'main',
+        fullBackupFrequency: 'weekly', // weekly, daily
+        incrementalBackupFrequency: 'hourly', // hourly, every2hours, every4hours, daily
+        autoBackupEnabled: true,
+        retentionDays: 30
+      };
+      await db.collection('backup_config').insertOne(config);
+    }
+
+    res.json({
+      success: true,
+      config: config
+    });
+
+  } catch (error) {
+    console.error('Error fetching backup config:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Update backup configuration
+app.put('/api/backup/config', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const staffIdentifier = req.headers['x-staff-identifier'];
+    if (!await hasPermission(staffIdentifier, 'backupConfig')) {
+      return res.status(403).json({ error: 'Permission denied. You need "backupConfig" permission.' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    const { fullBackupFrequency, incrementalBackupFrequency, autoBackupEnabled, retentionDays } = req.body;
+
+    const config = {
+      _id: 'main',
+      fullBackupFrequency: fullBackupFrequency || 'weekly',
+      incrementalBackupFrequency: incrementalBackupFrequency || 'hourly',
+      autoBackupEnabled: autoBackupEnabled !== undefined ? autoBackupEnabled : true,
+      retentionDays: retentionDays || 30,
+      updatedAt: new Date().toISOString(),
+      updatedBy: staffIdentifier
+    };
+
+    await db.collection('backup_config').replaceOne({ _id: 'main' }, config, { upsert: true });
+
+    // Log audit
+    await logAudit({
+      action: 'update_backup_config',
+      resourceType: 'backup_config',
+      resourceId: 'main',
+      staffIdentifier: staffIdentifier,
+      changes: [{
+        field: 'config',
+        old: null,
+        new: JSON.stringify(config),
+        description: `Updated backup configuration: Full=${fullBackupFrequency}, Incremental=${incrementalBackupFrequency}, Auto=${autoBackupEnabled}`
+      }]
+    });
+
+    res.json({
+      success: true,
+      config: config
+    });
+
+  } catch (error) {
+    console.error('Error updating backup config:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
@@ -4075,8 +4626,14 @@ app.get('/', (req, res) => {
   });
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+// Export for Vercel serverless functions
+module.exports = app;
+
+// for local development
+if (require.main === module) {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
 
