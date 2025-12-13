@@ -5358,15 +5358,26 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
-// Manual trigger endpoint for auto backup (for Vercel Cron Jobs)
-app.post('/api/backup/auto', async (req, res) => {
+// Auto backup endpoint (for Vercel Cron Jobs - accepts both GET and POST)
+const handleAutoBackup = async (req, res) => {
   let lockAcquired = false;
   try {
-    // Allow Vercel Cron Jobs (they send x-vercel-cron header) or API key
+    // Vercel Cron Jobs send requests with x-vercel-cron header (value can vary)
+    // Manual triggers can use POST with API key
     const authHeader = req.headers['x-api-key'];
-    const isVercelCron = req.headers['x-vercel-cron'] === '1';
+    const vercelCronHeader = req.headers['x-vercel-cron'];
+    const isVercelCron = !!vercelCronHeader; // Just check if header exists
+    
+    console.log('🕐 Auto backup triggered:', {
+      method: req.method,
+      isVercelCron: isVercelCron,
+      vercelCronHeader: vercelCronHeader,
+      hasApiKey: !!authHeader,
+      timestamp: new Date().toISOString()
+    });
     
     if (!isVercelCron && authHeader !== API_SECRET) {
+      console.log('❌ Unauthorized backup attempt - missing Vercel cron header or API key');
       return res.status(401).json({ error: 'Unauthorized' });
     }
 
@@ -5523,7 +5534,11 @@ app.post('/api/backup/auto', async (req, res) => {
       message: error.message 
     });
   }
-});
+};
+
+// Accept both GET (for Vercel Cron) and POST (for manual triggers)
+app.get('/api/backup/auto', handleAutoBackup);
+app.post('/api/backup/auto', handleAutoBackup);
 
 // Root endpoint (for testing)
 app.get('/', (req, res) => {
