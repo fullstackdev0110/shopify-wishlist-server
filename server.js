@@ -3090,7 +3090,7 @@ app.post('/api/trade-in/submit', async (req, res) => {
 
     // Validate payment details based on payment method
     if (paymentMethod === 'bank_transfer') {
-      if (!paymentDetails?.accountNumber || !paymentDetails?.sortCode || !paymentDetails?.accountName) {
+      if (!paymentDetails?.firstName || !paymentDetails?.lastName || !paymentDetails?.sortCode || !paymentDetails?.accountNumber) {
         return res.status(400).json({ 
           error: 'Bank account details are required for bank transfer' 
         });
@@ -3996,7 +3996,7 @@ app.post('/api/trade-in/:id/issue-cash-payment', async (req, res) => {
       // Bank transfer processing
       const bankDetails = submission.paymentDetails;
       
-      if (!bankDetails?.accountNumber || !bankDetails?.sortCode || !bankDetails?.accountName) {
+      if (!bankDetails?.firstName || !bankDetails?.lastName || !bankDetails?.sortCode || !bankDetails?.accountNumber) {
         return res.status(400).json({ 
           error: 'Bank account details not found in submission' 
         });
@@ -4008,15 +4008,16 @@ app.post('/api/trade-in/:id/issue-cash-payment', async (req, res) => {
       
       paymentResult = {
         method: 'bank_transfer',
+        firstName: bankDetails.firstName,
+        lastName: bankDetails.lastName,
         accountNumber: bankDetails.accountNumber,
         sortCode: bankDetails.sortCode,
-        accountName: bankDetails.accountName,
         amount: submission.finalPrice,
         status: 'processing', // Will be 'completed' when transfer is confirmed
         reference: paymentReference
       };
       
-      console.log(`Bank transfer initiated: ${bankDetails.accountName}, Amount: £${submission.finalPrice}, Reference: ${paymentReference}`);
+      console.log(`Bank transfer initiated: ${bankDetails.firstName} ${bankDetails.lastName}, Amount: £${submission.finalPrice}, Reference: ${paymentReference}`);
       
       // Note: To enable automated bank transfers, you need to:
       // 1. Set up Stripe Connect or Open Banking API
@@ -4100,9 +4101,10 @@ app.post('/api/trade-in/:id/issue-cash-payment', async (req, res) => {
           <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0;">
             <h3 style="margin-top: 0;">Payment Details</h3>
             <p><strong>Amount:</strong> £${submission.finalPrice.toFixed(2)}</p>
-            <p><strong>Account Name:</strong> ${submission.paymentDetails.accountName}</p>
-            <p><strong>Account Number:</strong> ${submission.paymentDetails.accountNumber}</p>
+            <p><strong>First Name:</strong> ${submission.paymentDetails.firstName}</p>
+            <p><strong>Last Name:</strong> ${submission.paymentDetails.lastName}</p>
             <p><strong>Sort Code:</strong> ${submission.paymentDetails.sortCode}</p>
+            <p><strong>Account Number:</strong> ${submission.paymentDetails.accountNumber}</p>
             <p><strong>Payment Reference:</strong> ${paymentReference}</p>
             <p><strong>Status:</strong> Processing (usually completes within 1-3 business days)</p>
           </div>
