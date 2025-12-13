@@ -5400,11 +5400,90 @@ const handleAutoBackup = async (req, res) => {
       return res.status(500).json({ error: 'Database connection failed after retries' });
     }
 
-    // Acquire backup lock to prevent concurrent backups
+    // Check if enough time has passed since last backup BEFORE acquiring lock
+    // This prevents unnecessary lock acquisition
+    const lastBackupCheck = await db.collection('backups').findOne(
+      {},
+      { sort: { createdAt: -1 } }
+    );
+
+    if (lastBackupCheck) {
+      const config = await db.collection('backup_config').findOne({ _id: 'main' });
+      if (config && config.autoBackupEnabled) {
+        const timeSinceLastBackup = Date.now() - new Date(lastBackupCheck.createdAt).getTime();
+        const incrementalInterval = getIntervalMs(config.incrementalBackupFrequency);
+        
+        // If last backup was recent (less than required interval), skip early
+        if (timeSinceLastBackup < incrementalInterval) {
+          const minutesRemaining = Math.ceil((incrementalInterval - timeSinceLastBackup) / 1000 / 60);
+          console.log(`⏭️ Skipping backup - only ${Math.ceil(timeSinceLastBackup / 1000 / 60)} minutes since last backup, need ${Math.ceil(incrementalInterval / 1000 / 60)} minutes`);
+          return res.json({ 
+            success: true, 
+            message: `Skipping backup - next backup in ${minutesRemaining} minutes`,
+            skipped: true
+          });
+        }
+      }
+    }
+
+    // Acquire backup lock atomically to prevent concurrent backups
     const lockKey = 'backup_in_progress';
     const lockExpiry = new Date(Date.now() + 30 * 60 * 1000); // 30 minutes expiry
+    const now = new Date();
     
     try {
+      // First, check if lock exists and is still valid
+      const existingLock = await db.collection('backup_locks').findOne({ _id: lockKey });
+      if (existingLock && new Date(existingLock.expiresAt) > now) {
+        const minutesRemaining = Math.ceil((new Date(existingLock.expiresAt) - now.getTime()) / 1000 / 60);
+        console.log(`⏭️ Backup already in progress. Lock expires in ${minutesRemaining} minutes`);
+        return res.json({ 
+          success: true, 
+          message: `Backup already in progress. Lock expires in ${minutesRemaining} minutes`,
+          skipped: true
+        });
+      }
+
+      // Try to acquire lock atomically - only succeeds if lock doesn't exist or has expired
+      // Use updateOne with upsert to ensure atomicity
+      const updateResult = await db.collection('backup_locks').updateOne(
+        { 
+          _id: lockKey,
+          $or: [
+            { expiresAt: { $exists: false } },
+            { expiresAt: { $lt: now.toISOString() } }
+          ]
+        },
+        { 
+          $set: {
+            _id: lockKey,
+            expiresAt: lockExpiry.toISOString(),
+            createdAt: new Date().toISOString()
+          }
+        },
+        { upsert: true }
+      );
+
+      // If matchedCount is 0 and upsertedCount is 0, another process acquired the lock between our check and update
+      if (updateResult.matchedCount === 0 && updateResult.upsertedCount === 0) {
+        // Double-check if lock was acquired by another process
+        const newLock = await db.collection('backup_locks').findOne({ _id: lockKey });
+        if (newLock && new Date(newLock.expiresAt) > now) {
+          const minutesRemaining = Math.ceil((new Date(newLock.expiresAt) - now.getTime()) / 1000 / 60);
+          console.log(`⏭️ Backup lock acquired by another process. Lock expires in ${minutesRemaining} minutes`);
+          return res.json({ 
+            success: true, 
+            message: `Backup already in progress. Lock expires in ${minutesRemaining} minutes`,
+            skipped: true
+          });
+        }
+      }
+      
+      lockAcquired = true;
+      console.log('🔒 Backup lock acquired atomically');
+    } catch (lockError) {
+      console.error('Error acquiring backup lock:', lockError);
+      // Check if lock exists (another process might have acquired it)
       const existingLock = await db.collection('backup_locks').findOne({ _id: lockKey });
       if (existingLock && new Date(existingLock.expiresAt) > new Date()) {
         const minutesRemaining = Math.ceil((new Date(existingLock.expiresAt) - Date.now()) / 1000 / 60);
@@ -5414,21 +5493,6 @@ const handleAutoBackup = async (req, res) => {
           skipped: true
         });
       }
-      
-      // Set lock
-      await db.collection('backup_locks').replaceOne(
-        { _id: lockKey },
-        { 
-          _id: lockKey,
-          expiresAt: lockExpiry.toISOString(),
-          createdAt: new Date().toISOString()
-        },
-        { upsert: true }
-      );
-      lockAcquired = true;
-      console.log('🔒 Backup lock acquired');
-    } catch (lockError) {
-      console.error('Error acquiring backup lock:', lockError);
       return res.status(500).json({ error: 'Failed to acquire backup lock' });
     }
 
