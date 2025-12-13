@@ -4531,17 +4531,16 @@ app.post('/api/backup/create', async (req, res) => {
         // Full backup - get all documents
         documents = await db.collection(collectionName).find({}).toArray();
       } else {
-        // Incremental backup - get only changed documents
+        // Incremental backup - get only changed documents since last backup (incremental or full)
         const lastBackup = await db.collection('backups').findOne(
           { 
-            'collections.name': collectionName,
-            type: 'full'
+            'collections.name': collectionName
           },
           { sort: { createdAt: -1 } }
         );
         
-        const lastFullBackupTime = lastBackup ? new Date(lastBackup.createdAt) : null;
-        documents = await getChangedDocuments(collectionName, lastFullBackupTime);
+        const lastBackupTime = lastBackup ? new Date(lastBackup.createdAt) : null;
+        documents = await getChangedDocuments(collectionName, lastBackupTime);
       }
 
       backupData.collections.push({
@@ -5170,29 +5169,37 @@ async function performAutoBackup(type = 'incremental') {
     };
 
     // Backup MongoDB collections
+    let totalDocuments = 0;
     for (const collectionName of collectionsToBackup) {
       let documents;
       
       if (backupType === 'full') {
         documents = await db.collection(collectionName).find({}).toArray();
       } else {
+        // For incremental backups, compare against the LAST backup (incremental or full)
         const lastBackup = await db.collection('backups').findOne(
           { 
-            'collections.name': collectionName,
-            type: 'full'
+            'collections.name': collectionName
           },
           { sort: { createdAt: -1 } }
         );
         
-        const lastFullBackupTime = lastBackup ? new Date(lastBackup.createdAt) : null;
-        documents = await getChangedDocuments(collectionName, lastFullBackupTime);
+        const lastBackupTime = lastBackup ? new Date(lastBackup.createdAt) : null;
+        documents = await getChangedDocuments(collectionName, lastBackupTime);
       }
 
+      totalDocuments += documents.length;
       backupData.collections.push({
         name: collectionName,
         count: documents.length,
         data: documents
       });
+    }
+
+    // Skip backup if no documents changed (for incremental) or no documents exist (for full)
+    if (backupType === 'incremental' && totalDocuments === 0) {
+      console.log('⏭️ Skipping incremental backup - no changes detected');
+      throw new Error('Skipping incremental backup - no changes detected');
     }
 
     // Backup Shopify data (only on full backups)
