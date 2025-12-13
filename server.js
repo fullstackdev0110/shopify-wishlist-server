@@ -1295,7 +1295,32 @@ app.get('/api/products/trade-in', async (req, res) => {
     }
 
     // Fetch products from MongoDB
-    const products = await db.collection('trade_in_products').find(query).toArray();
+    let products = await db.collection('trade_in_products').find(query).toArray();
+    
+    // Auto-generate slugs for products that don't have one
+    const updatePromises = [];
+    for (const product of products) {
+      if (!product.slug || product.slug === '') {
+        const slug = generateProductSlug(product.brand, product.model, product.storage, product.color);
+        // Check for duplicates
+        const existing = products.find(p => p.slug === slug && p._id.toString() !== product._id.toString());
+        const finalSlug = existing ? slug + '-' + product._id.toString().substring(0, 8) : slug;
+        
+        updatePromises.push(
+          db.collection('trade_in_products').updateOne(
+            { _id: product._id },
+            { $set: { slug: finalSlug } }
+          )
+        );
+        product.slug = finalSlug; // Update in memory for immediate use
+      }
+    }
+    
+    // Update all products with missing slugs in parallel
+    if (updatePromises.length > 0) {
+      await Promise.all(updatePromises);
+      console.log(`✅ Auto-generated ${updatePromises.length} slugs for products`);
+    }
     
     console.log(`📦 Fetched ${products.length} products from MongoDB for deviceType: ${deviceType || 'all'}`);
     if (products.length > 0) {
@@ -1305,7 +1330,8 @@ app.get('/api/products/trade-in', async (req, res) => {
         storage: products[0].storage,
         deviceType: products[0].deviceType,
         hasImage: !!products[0].imageUrl,
-        hasPrices: !!products[0].prices
+        hasPrices: !!products[0].prices,
+        hasSlug: !!products[0].slug
       });
     }
 
@@ -1423,7 +1449,32 @@ app.get('/api/products/admin', async (req, res) => {
       return res.status(500).json({ error: 'Database connection failed' });
     }
 
-    const products = await db.collection('trade_in_products').find({}).sort({ brand: 1, model: 1, storage: 1 }).toArray();
+    let products = await db.collection('trade_in_products').find({}).sort({ brand: 1, model: 1, storage: 1 }).toArray();
+    
+    // Auto-generate slugs for products that don't have one
+    const updatePromises = [];
+    for (const product of products) {
+      if (!product.slug || product.slug === '') {
+        const slug = generateProductSlug(product.brand, product.model, product.storage, product.color);
+        // Check for duplicates
+        const existing = products.find(p => p.slug === slug && p._id.toString() !== product._id.toString());
+        const finalSlug = existing ? slug + '-' + product._id.toString().substring(0, 8) : slug;
+        
+        updatePromises.push(
+          db.collection('trade_in_products').updateOne(
+            { _id: product._id },
+            { $set: { slug: finalSlug } }
+          )
+        );
+        product.slug = finalSlug; // Update in memory for immediate use
+      }
+    }
+    
+    // Update all products with missing slugs in parallel
+    if (updatePromises.length > 0) {
+      await Promise.all(updatePromises);
+      console.log(`✅ Admin: Auto-generated ${updatePromises.length} slugs for products`);
+    }
     
     // Log sample product to verify imageUrl is present
     if (products.length > 0) {
@@ -1433,7 +1484,8 @@ app.get('/api/products/admin', async (req, res) => {
         model: products[0].model,
         storage: products[0].storage,
         imageUrl: products[0].imageUrl || 'NULL/EMPTY',
-        hasImageUrl: !!products[0].imageUrl
+        hasImageUrl: !!products[0].imageUrl,
+        hasSlug: !!products[0].slug
       });
     }
 
