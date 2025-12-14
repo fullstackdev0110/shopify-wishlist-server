@@ -1518,6 +1518,16 @@ app.get('/api/products/by-slug/:slug', async (req, res) => {
       return res.status(404).json({ error: 'Product not found' });
     }
 
+    // Fetch ALL variants for this product model (same brand + model)
+    // This ensures all storage/color options are available
+    const allVariants = await db.collection('trade_in_products').find({
+      brand: product.brand,
+      model: product.model,
+      deviceType: product.deviceType
+    }).toArray();
+
+    console.log(`📦 Found ${allVariants.length} variants for ${product.brand} ${product.model}`);
+
     // Transform to match frontend expected format
     const imageUrl = product.imageUrl || getDefaultImageUrl(product.deviceType);
     const productImage = {
@@ -1527,20 +1537,28 @@ app.get('/api/products/by-slug/:slug', async (req, res) => {
       height: 800
     };
 
-    const variantGid = 'gid://database/Variant/' + product._id + '_' + product.storage + '_' + (product.color || 'default');
-    const variant = {
-      id: variantGid,
-      gid: variantGid,
-      title: product.storage + (product.color ? ' - ' + product.color : ''),
-      price: product.prices?.Excellent || 0,
-      availableForSale: true,
-      image: productImage,
-      options: {
-        storage: product.storage,
-        color: product.color || 'Default'
-      },
-      _productData: product // Include full product data with slug
-    };
+    // Create variants array from all products with same brand/model
+    const variants = allVariants.map(p => {
+      const variantGid = 'gid://database/Variant/' + p._id + '_' + p.storage + '_' + (p.color || 'default');
+      return {
+        id: variantGid,
+        gid: variantGid,
+        title: p.storage + (p.color ? ' - ' + p.color : ''),
+        price: p.prices?.Excellent || 0,
+        availableForSale: true,
+        image: {
+          url: p.imageUrl || imageUrl,
+          altText: p.brand + ' ' + p.model + ' ' + p.storage,
+          width: 800,
+          height: 800
+        },
+        options: {
+          storage: p.storage,
+          color: p.color || 'Default'
+        },
+        _productData: p // Include full product data with slug
+      };
+    });
 
     const transformedProduct = {
       id: product._id.toString(),
@@ -1551,10 +1569,12 @@ app.get('/api/products/by-slug/:slug', async (req, res) => {
       tags: [product.deviceType || 'phone', 'trade-in'],
       featuredImage: productImage,
       images: [productImage],
-      variants: [variant],
+      variants: variants, // Include ALL variants, not just the one matching the slug
       slug: product.slug,
       prices: product.prices || {}
     };
+
+    console.log(`✅ Returning product with ${variants.length} variants`);
 
     res.json({
       success: true,
