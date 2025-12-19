@@ -13,13 +13,16 @@ let lastBackupCheck = null;
 
 // Enable CORS for Shopify store - MUST BE BEFORE OTHER MIDDLEWARE
 app.use((req, res, next) => {
+  // Set CORS headers
   res.header('Access-Control-Allow-Origin', '*'); // Allow all origins
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, X-API-Key, X-Staff-Identifier');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, X-API-Key, X-Staff-Identifier, Authorization');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  res.header('Access-Control-Max-Age', '86400'); // 24 hours
   
   // Handle preflight requests
   if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
+    return res.status(200).end();
   }
   
   next();
