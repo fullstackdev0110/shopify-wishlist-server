@@ -15,23 +15,15 @@ let lastBackupCheck = null;
 // Enable CORS for Shopify store - MUST BE BEFORE OTHER MIDDLEWARE
 // Use cors package for reliable CORS handling
 app.use(cors({
-  origin: function (origin, callback) {
-    // Allow requests with origin (browser requests) or no origin (mobile apps, Postman, etc.)
-    if (!origin || origin.includes('myshopify.com') || origin.includes('localhost')) {
-      callback(null, true);
-    } else {
-      callback(null, true); // Allow all origins for now
-    }
-  },
+  origin: true, // Allow all origins (reflects the request origin back)
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: ['Content-Type', 'X-API-Key', 'X-Staff-Identifier', 'Authorization', 'Accept'],
   exposedHeaders: ['Content-Length', 'Content-Type'],
-  maxAge: 86400
+  maxAge: 86400,
+  preflightContinue: false,
+  optionsSuccessStatus: 200
 }));
-
-// Also ensure OPTIONS requests are handled explicitly
-app.options('*', cors());
 
 app.use(express.json());
 
