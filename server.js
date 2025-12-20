@@ -1,4 +1,5 @@
 const express = require('express');
+const cors = require('cors');
 const fetch = require('node-fetch');
 const nodemailer = require('nodemailer');
 const { MongoClient, ObjectId } = require('mongodb');
@@ -12,47 +13,25 @@ let backupScheduler = null;
 let lastBackupCheck = null;
 
 // Enable CORS for Shopify store - MUST BE BEFORE OTHER MIDDLEWARE
-// This middleware handles CORS for all routes
-app.use((req, res, next) => {
-  // Get origin from request
-  const origin = req.headers.origin;
-  
-  // Set CORS headers for all responses
-  if (origin) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-  } else {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-  }
-  
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-API-Key, X-Staff-Identifier, Authorization, Accept');
-  res.setHeader('Access-Control-Max-Age', '86400'); // 24 hours
-  res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Type');
-  
-  // Handle preflight OPTIONS requests - MUST return before other middleware
-  if (req.method === 'OPTIONS') {
-    console.log('✅ OPTIONS preflight request - sending CORS headers');
-    return res.status(200).send('');
-  }
-  
-  next();
-});
+// Use cors package for reliable CORS handling
+app.use(cors({
+  origin: function (origin, callback) {
+    // Allow requests with origin (browser requests) or no origin (mobile apps, Postman, etc.)
+    if (!origin || origin.includes('myshopify.com') || origin.includes('localhost')) {
+      callback(null, true);
+    } else {
+      callback(null, true); // Allow all origins for now
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'X-API-Key', 'X-Staff-Identifier', 'Authorization', 'Accept'],
+  exposedHeaders: ['Content-Length', 'Content-Type'],
+  maxAge: 86400
+}));
 
-// Also add a catch-all OPTIONS handler at the root level (for Vercel)
-app.options('*', (req, res) => {
-  const origin = req.headers.origin;
-  if (origin) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-  } else {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-  }
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-API-Key, X-Staff-Identifier, Authorization, Accept');
-  res.setHeader('Access-Control-Max-Age', '86400');
-  return res.status(200).send('');
-});
+// Also ensure OPTIONS requests are handled explicitly
+app.options('*', cors());
 
 app.use(express.json());
 
