@@ -3998,9 +3998,24 @@ app.post('/api/trade-in/submit', async (req, res) => {
     // Default to store_credit if not specified
     const selectedPaymentMethod = paymentMethod || 'store_credit';
 
+    // Get customer ID from token if authenticated (optional - guest submissions allowed)
+    let customerId = null;
+    try {
+      const authHeader = req.headers['authorization'];
+      const token = authHeader && authHeader.split(' ')[1];
+      if (token) {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        customerId = decoded.customerId;
+      }
+    } catch (tokenError) {
+      // Token invalid or missing - allow guest submission
+      console.log('Guest submission (no valid token)');
+    }
+
     // Create submission
     const submission = {
       id: submissionIdCounter++,
+      customerId: customerId || null, // Link to customer if logged in
       name,
       email,
       phone: phone || '',
