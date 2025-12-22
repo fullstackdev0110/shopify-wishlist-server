@@ -398,7 +398,7 @@ app.post('/api/wishlist', async (req, res) => {
         console.warn('JWT token invalid, checking legacy auth:', jwtError.message);
       }
     }
-    
+
     // Legacy support: Check for API key auth (backward compatibility)
     if (!customerId) {
       const apiKeyHeader = req.headers['x-api-key'];
@@ -478,7 +478,7 @@ app.get('/api/wishlist/get', async (req, res) => {
         console.warn('JWT token invalid, checking legacy auth:', jwtError.message);
       }
     }
-    
+
     // Legacy support: Check for API key auth and customer_id query param
     if (!customerId) {
       const apiKeyHeader = req.headers['x-api-key'];
@@ -507,10 +507,10 @@ app.get('/api/wishlist/get', async (req, res) => {
     });
 
     if (wishlistDoc && wishlistDoc.productIds) {
-      res.json({ 
-        success: true, 
+        res.json({ 
+          success: true, 
         wishlist: Array.isArray(wishlistDoc.productIds) ? wishlistDoc.productIds : []
-      });
+        });
     } else {
       // No wishlist found - return empty array
       res.json({ success: true, wishlist: [] });
@@ -4149,6 +4149,89 @@ app.put('/api/customer/change-password', authenticateToken, async (req, res) => 
 // ============================================
 // TRADE-IN SUBMISSION ENDPOINTS
 // ============================================
+
+// Email price quote
+app.post('/api/trade-in/email-price', async (req, res) => {
+  try {
+    const { to, subject, itemName, brand, model, storage, condition, price, priceFormatted, deviceType, pageUrl } = req.body;
+    
+    if (!to || !itemName || !price) {
+      return res.status(400).json({ error: 'Missing required fields (to, itemName, price)' });
+    }
+    
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(to)) {
+      return res.status(400).json({ error: 'Invalid email address' });
+    }
+    
+    // Create email content
+    const emailSubject = subject || `Trade-in Quote: ${itemName}`;
+    const escapedItemName = itemName.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const escapedCondition = (condition || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const escapedStorage = (storage || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const priceDisplay = priceFormatted || '£' + parseFloat(price).toFixed(2);
+    const emailUrl = pageUrl || 'https://tech-corner-9576.myshopify.com/pages/sell-your-device';
+    
+    const emailHtml = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 2rem;">
+        <h2 style="color: #10b981; margin-bottom: 1rem;">Trade-in Quote</h2>
+        <p>Thank you for your interest in trading in your device with us!</p>
+        
+        <div style="background: #f5f5f5; padding: 1.5rem; border-radius: 8px; margin: 2rem 0;">
+          <h3 style="margin-top: 0; color: #333;">${escapedItemName}</h3>
+          <p><strong>Condition:</strong> ${escapedCondition}</p>
+          <p><strong>Storage:</strong> ${escapedStorage}</p>
+          <p style="font-size: 1.5rem; color: #10b981; font-weight: 700; margin: 1rem 0;">
+            We'll pay you: ${priceDisplay}
+          </p>
+        </div>
+        
+        <p>This quote is valid for 30 days. To proceed with your trade-in, please visit:</p>
+        <p><a href="${emailUrl}" style="color: #10b981; text-decoration: underline;">Complete Your Trade-in</a></p>
+        
+        <p style="margin-top: 2rem; color: #666; font-size: 0.9rem;">
+          If you have any questions, please don't hesitate to contact us.
+        </p>
+      </div>
+    `;
+    
+    const emailText = `
+Trade-in Quote
+
+Thank you for your interest in trading in your device with us!
+
+Device: ${itemName}
+Condition: ${condition}
+Storage: ${storage}
+
+We'll pay you: ${priceFormatted || '£' + parseFloat(price).toFixed(2)}
+
+This quote is valid for 30 days. To proceed with your trade-in, please visit:
+${pageUrl || 'https://tech-corner-9576.myshopify.com/pages/sell-your-device'}
+
+If you have any questions, please don't hesitate to contact us.
+    `;
+    
+    // Send email
+    await transporter.sendMail({
+      from: `"Tech Corner" <${SMTP_USER}>`,
+      to: to,
+      subject: emailSubject,
+      text: emailText,
+      html: emailHtml
+    });
+    
+    res.json({ 
+      success: true, 
+      message: 'Price quote email sent successfully' 
+    });
+    
+  } catch (error) {
+    console.error('Error sending price email:', error);
+    res.status(500).json({ error: 'Failed to send email' });
+  }
+});
 
 // Submit trade-in request
 app.post('/api/trade-in/submit', async (req, res) => {
