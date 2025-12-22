@@ -3392,6 +3392,150 @@ function createToken(customerId, email) {
   );
 }
 
+// Helper function to create or find Shopify customer
+async function createOrFindShopifyCustomer(firstName, lastName, email, phone, postcode) {
+  try {
+    if (!SHOPIFY_SHOP || !SHOPIFY_ACCESS_TOKEN) {
+      console.warn('Shopify credentials not configured - skipping Shopify customer creation');
+      return null;
+    }
+
+    // First, try to find existing customer by email
+    const searchResponse = await fetch(
+      `https://${SHOPIFY_SHOP}/admin/api/2024-01/customers/search.json?query=email:${encodeURIComponent(email)}`,
+      {
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    if (searchResponse.ok) {
+      const searchData = await searchResponse.json();
+      if (searchData.customers && searchData.customers.length > 0) {
+        // Customer exists, return their ID
+        const existingCustomer = searchData.customers[0];
+        console.log(`Found existing Shopify customer: ${existingCustomer.id}`);
+        return existingCustomer.id.toString();
+      }
+    }
+
+    // Customer doesn't exist, create new one
+    const customerData = {
+      customer: {
+        first_name: firstName,
+        last_name: lastName,
+        email: email,
+        phone: phone || null,
+        addresses: postcode ? [{
+          address1: '',
+          city: '',
+          province: '',
+          country: 'United Kingdom',
+          zip: postcode
+        }] : []
+      }
+    };
+
+    const createResponse = await fetch(
+      `https://${SHOPIFY_SHOP}/admin/api/2024-01/customers.json`,
+      {
+        method: 'POST',
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(customerData)
+      }
+    );
+
+    if (createResponse.ok) {
+      const createData = await createResponse.json();
+      if (createData.customer) {
+        console.log(`Created new Shopify customer: ${createData.customer.id}`);
+        return createData.customer.id.toString();
+      }
+    } else {
+      const errorData = await createResponse.json().catch(() => ({}));
+      console.error('Error creating Shopify customer:', errorData);
+    }
+
+    return null;
+  } catch (error) {
+    console.error('Error in createOrFindShopifyCustomer:', error);
+    return null; // Don't fail registration if Shopify creation fails
+  }
+}
+
+// Helper function to update Shopify customer
+async function updateShopifyCustomer(shopifyCustomerId, firstName, lastName, phone, postcode) {
+  try {
+    if (!SHOPIFY_SHOP || !SHOPIFY_ACCESS_TOKEN || !shopifyCustomerId) {
+      return false;
+    }
+
+    const customerData = {
+      customer: {
+        first_name: firstName,
+        last_name: lastName,
+        phone: phone || null
+      }
+    };
+
+    // Update address if postcode provided
+    if (postcode) {
+      // First get existing customer to preserve addresses
+      const getResponse = await fetch(
+        `https://${SHOPIFY_SHOP}/admin/api/2024-01/customers/${shopifyCustomerId}.json`,
+        {
+          headers: {
+            'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      if (getResponse.ok) {
+        const getData = await getResponse.json();
+        const existingAddresses = getData.customer?.addresses || [];
+        
+        // Update or add address with postcode
+        const addressIndex = existingAddresses.findIndex(addr => addr.zip === postcode);
+        if (addressIndex >= 0) {
+          existingAddresses[addressIndex].zip = postcode;
+        } else {
+          existingAddresses.push({
+            address1: '',
+            city: '',
+            province: '',
+            country: 'United Kingdom',
+            zip: postcode
+          });
+        }
+        customerData.customer.addresses = existingAddresses;
+      }
+    }
+
+    const updateResponse = await fetch(
+      `https://${SHOPIFY_SHOP}/admin/api/2024-01/customers/${shopifyCustomerId}.json`,
+      {
+        method: 'PUT',
+        headers: {
+          'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(customerData)
+      }
+    );
+
+    return updateResponse.ok;
+  } catch (error) {
+    console.error('Error updating Shopify customer:', error);
+    return false;
+  }
+}
+
 // ============================================
 // AUTHENTICATION ENDPOINTS
 // ============================================
@@ -3431,7 +3575,22 @@ app.post('/api/auth/register', async (req, res) => {
     const saltRounds = 10;
     const passwordHash = await bcrypt.hash(password, saltRounds);
     
-    // Create customer
+    // Create Shopify customer (in background, don't fail if it fails)
+    let shopifyCustomerId = null;
+    try {
+      shopifyCustomerId = await createOrFindShopifyCustomer(
+        firstName.trim(),
+        lastName.trim(),
+        email.toLowerCase().trim(),
+        phone || '',
+        postcode || ''
+      );
+    } catch (shopifyError) {
+      console.error('Error creating Shopify customer (non-fatal):', shopifyError);
+      // Continue with registration even if Shopify creation fails
+    }
+    
+    // Create customer in MongoDB
     const customer = {
       firstName: firstName.trim(),
       lastName: lastName.trim(),
@@ -3439,6 +3598,7 @@ app.post('/api/auth/register', async (req, res) => {
       passwordHash,
       phone: phone || '',
       postcode: postcode || '',
+      shopifyCustomerId: shopifyCustomerId || null, // Store Shopify customer ID
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       emailVerified: false,
@@ -3528,6 +3688,31 @@ app.post('/api/auth/login', async (req, res) => {
       });
     }
     
+    // Sync with Shopify if shopifyCustomerId is missing
+    if (!customer.shopifyCustomerId) {
+      try {
+        const shopifyCustomerId = await createOrFindShopifyCustomer(
+          customer.firstName,
+          customer.lastName,
+          customer.email,
+          customer.phone,
+          customer.postcode
+        );
+        
+        if (shopifyCustomerId) {
+          // Update MongoDB customer with Shopify ID
+          await db.collection('customers').updateOne(
+            { _id: customer._id },
+            { $set: { shopifyCustomerId: shopifyCustomerId } }
+          );
+          customer.shopifyCustomerId = shopifyCustomerId;
+        }
+      } catch (shopifyError) {
+        console.error('Error syncing Shopify customer (non-fatal):', shopifyError);
+        // Continue with login even if Shopify sync fails
+      }
+    }
+    
     // Create session
     const sessionId = generateSessionId();
     const expiresAt = new Date();
@@ -3555,7 +3740,8 @@ app.post('/api/auth/login', async (req, res) => {
         lastName: customer.lastName,
         email: customer.email,
         phone: customer.phone,
-        postcode: customer.postcode
+        postcode: customer.postcode,
+        shopifyCustomerId: customer.shopifyCustomerId || null
       }
     });
     
@@ -3592,6 +3778,7 @@ app.get('/api/auth/me', authenticateToken, async (req, res) => {
         email: customer.email,
         phone: customer.phone,
         postcode: customer.postcode,
+        shopifyCustomerId: customer.shopifyCustomerId || null,
         createdAt: customer.createdAt
       }
     });
@@ -3847,29 +4034,51 @@ app.put('/api/customer/profile', authenticateToken, async (req, res) => {
     if (phone !== undefined) updateData.phone = phone || '';
     if (postcode !== undefined) updateData.postcode = postcode || '';
     
+    // Get customer first to check for shopifyCustomerId
+    const customer = await db.collection('customers').findOne({ 
+      _id: new ObjectId(customerId) 
+    });
+    
+    if (!customer) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
+    
+    // Update MongoDB
     const result = await db.collection('customers').updateOne(
       { _id: new ObjectId(customerId) },
       { $set: updateData }
     );
     
-    if (result.matchedCount === 0) {
-      return res.status(404).json({ error: 'Customer not found' });
+    // Sync with Shopify if shopifyCustomerId exists
+    if (customer.shopifyCustomerId) {
+      try {
+        await updateShopifyCustomer(
+          customer.shopifyCustomerId,
+          updateData.firstName || customer.firstName,
+          updateData.lastName || customer.lastName,
+          updateData.phone !== undefined ? updateData.phone : customer.phone,
+          updateData.postcode !== undefined ? updateData.postcode : customer.postcode
+        );
+      } catch (shopifyError) {
+        console.error('Error syncing with Shopify (non-fatal):', shopifyError);
+        // Continue even if Shopify update fails
+      }
     }
     
     // Get updated customer
-    const customer = await db.collection('customers').findOne({ 
+    const updatedCustomer = await db.collection('customers').findOne({ 
       _id: new ObjectId(customerId) 
     });
     
     res.json({
       success: true,
       customer: {
-        id: customer._id.toString(),
-        firstName: customer.firstName,
-        lastName: customer.lastName,
-        email: customer.email,
-        phone: customer.phone,
-        postcode: customer.postcode
+        id: updatedCustomer._id.toString(),
+        firstName: updatedCustomer.firstName,
+        lastName: updatedCustomer.lastName,
+        email: updatedCustomer.email,
+        phone: updatedCustomer.phone,
+        postcode: updatedCustomer.postcode
       }
     });
     
@@ -3998,28 +4207,34 @@ app.post('/api/trade-in/submit', async (req, res) => {
     // Default to store_credit if not specified
     const selectedPaymentMethod = paymentMethod || 'store_credit';
 
-    // Get Shopify customer ID from request body (preferred) or from custom auth token (fallback)
-    let customerId = req.body.shopifyCustomerId || null;
-    
-    // Fallback to custom auth token if Shopify customer ID not provided
-    if (!customerId) {
-      try {
-        const authHeader = req.headers['authorization'];
-        const token = authHeader && authHeader.split(' ')[1];
-        if (token) {
-          const decoded = jwt.verify(token, JWT_SECRET);
-          customerId = decoded.customerId;
+    // Get customer ID from token if authenticated (optional - guest submissions allowed)
+    let customerId = null;
+    let shopifyCustomerId = null;
+    try {
+      const authHeader = req.headers['authorization'];
+      const token = authHeader && authHeader.split(' ')[1];
+      if (token) {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        customerId = decoded.customerId;
+        
+        // Get customer to get shopifyCustomerId
+        if (customerId && db) {
+          const customer = await db.collection('customers').findOne({ 
+            _id: new ObjectId(customerId) 
+          });
+          shopifyCustomerId = customer?.shopifyCustomerId || null;
         }
-      } catch (tokenError) {
-        // Token invalid or missing - allow guest submission
-        console.log('Guest submission (no valid token)');
       }
+    } catch (tokenError) {
+      // Token invalid or missing - allow guest submission
+      console.log('Guest submission (no valid token)');
     }
 
     // Create submission
     const submission = {
       id: submissionIdCounter++,
-      customerId: customerId || null, // Link to Shopify customer ID if logged in
+      customerId: customerId || null, // Link to customer if logged in
+      shopifyCustomerId: shopifyCustomerId || null, // Link to Shopify customer if available
       name,
       email,
       phone: phone || '',
@@ -4275,7 +4490,7 @@ app.get('/api/trade-in/list', async (req, res) => {
     // Ensure MongoDB connection
     await ensureMongoConnection();
 
-    const { status, limit = 100, offset = 0, customerId, email } = req.query;
+    const { status, limit = 100, offset = 0 } = req.query;
 
     let submissions = [];
     let total = 0;
@@ -4283,20 +4498,7 @@ app.get('/api/trade-in/list', async (req, res) => {
     // Try MongoDB first
     if (db) {
       try {
-        // Build query - filter by customer if provided
-        const query = {};
-        if (status) query.status = status;
-        
-        // Filter by Shopify customer ID or email
-        if (customerId) {
-          // Shopify customer ID format: gid://shopify/Customer/123456789
-          // Store it as-is or extract the numeric part
-          query.customerId = customerId;
-        } else if (email) {
-          // Fallback to email matching
-          query.email = email.toLowerCase().trim();
-        }
-        
+        const query = status ? { status: status } : {};
         total = await db.collection('submissions').countDocuments(query);
         submissions = await db.collection('submissions')
           .find(query)
