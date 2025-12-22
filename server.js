@@ -3998,24 +3998,28 @@ app.post('/api/trade-in/submit', async (req, res) => {
     // Default to store_credit if not specified
     const selectedPaymentMethod = paymentMethod || 'store_credit';
 
-    // Get customer ID from token if authenticated (optional - guest submissions allowed)
-    let customerId = null;
-    try {
-      const authHeader = req.headers['authorization'];
-      const token = authHeader && authHeader.split(' ')[1];
-      if (token) {
-        const decoded = jwt.verify(token, JWT_SECRET);
-        customerId = decoded.customerId;
+    // Get Shopify customer ID from request body (preferred) or from custom auth token (fallback)
+    let customerId = req.body.shopifyCustomerId || null;
+    
+    // Fallback to custom auth token if Shopify customer ID not provided
+    if (!customerId) {
+      try {
+        const authHeader = req.headers['authorization'];
+        const token = authHeader && authHeader.split(' ')[1];
+        if (token) {
+          const decoded = jwt.verify(token, JWT_SECRET);
+          customerId = decoded.customerId;
+        }
+      } catch (tokenError) {
+        // Token invalid or missing - allow guest submission
+        console.log('Guest submission (no valid token)');
       }
-    } catch (tokenError) {
-      // Token invalid or missing - allow guest submission
-      console.log('Guest submission (no valid token)');
     }
 
     // Create submission
     const submission = {
       id: submissionIdCounter++,
-      customerId: customerId || null, // Link to customer if logged in
+      customerId: customerId || null, // Link to Shopify customer ID if logged in
       name,
       email,
       phone: phone || '',
@@ -4271,7 +4275,7 @@ app.get('/api/trade-in/list', async (req, res) => {
     // Ensure MongoDB connection
     await ensureMongoConnection();
 
-    const { status, limit = 100, offset = 0 } = req.query;
+    const { status, limit = 100, offset = 0, customerId, email } = req.query;
 
     let submissions = [];
     let total = 0;
@@ -4279,7 +4283,20 @@ app.get('/api/trade-in/list', async (req, res) => {
     // Try MongoDB first
     if (db) {
       try {
-        const query = status ? { status: status } : {};
+        // Build query - filter by customer if provided
+        const query = {};
+        if (status) query.status = status;
+        
+        // Filter by Shopify customer ID or email
+        if (customerId) {
+          // Shopify customer ID format: gid://shopify/Customer/123456789
+          // Store it as-is or extract the numeric part
+          query.customerId = customerId;
+        } else if (email) {
+          // Fallback to email matching
+          query.email = email.toLowerCase().trim();
+        }
+        
         total = await db.collection('submissions').countDocuments(query);
         submissions = await db.collection('submissions')
           .find(query)
