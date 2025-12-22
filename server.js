@@ -375,65 +375,74 @@ async function savePricingRules() {
   }
 })();
 
-// Wishlist save endpoint
+// Wishlist save endpoint (updated to use MongoDB and JWT)
 app.post('/api/wishlist', async (req, res) => {
   try {
-    // Simple authentication check
-    const authHeader = req.headers['x-api-key'];
-    if (authHeader !== API_SECRET) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    const { customer_id, wishlist } = req.body;
-
-    if (!customer_id || !wishlist) {
-      return res.status(400).json({ error: 'Missing customer_id or wishlist' });
-    }
-
-    // Prepare GraphQL mutation to save to metafield
-    const metafieldValue = JSON.stringify(wishlist);
+    await ensureMongoConnection();
     
-    const mutation = `
-      mutation {
-        metafieldsSet(metafields: [{
-          ownerId: "gid://shopify/Customer/${customer_id}"
-          namespace: "custom"
-          key: "wishlist"
-          type: "json"
-          value: ${JSON.stringify(metafieldValue)}
-        }]) {
-          metafields {
-            id
-            key
-            value
-          }
-          userErrors {
-            field
-            message
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    // Check for JWT token (custom auth) first
+    let customerId = null;
+    const authHeader = req.headers['authorization'];
+    
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.split(' ')[1];
+      try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        customerId = decoded.customerId;
+      } catch (jwtError) {
+        // JWT invalid - check for legacy API key auth (for backward compatibility)
+        console.warn('JWT token invalid, checking legacy auth:', jwtError.message);
+      }
+    }
+    
+    // Legacy support: Check for API key auth (backward compatibility)
+    if (!customerId) {
+      const apiKeyHeader = req.headers['x-api-key'];
+      if (apiKeyHeader === API_SECRET) {
+        // Legacy mode: use customer_id from body (Shopify customer ID)
+        const { customer_id } = req.body;
+        if (customer_id) {
+          // Try to find MongoDB customer by shopifyCustomerId
+          const customer = await db.collection('customers').findOne({ 
+            shopifyCustomerId: customer_id.toString() 
+          });
+          if (customer) {
+            customerId = customer._id.toString();
           }
         }
       }
-    `;
-
-    // Call Shopify Admin API
-    const response = await fetch(`https://${SHOPIFY_SHOP}/admin/api/2024-01/graphql.json`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
-      },
-      body: JSON.stringify({ query: mutation })
-    });
-
-    const data = await response.json();
-
-    if (data.errors || (data.data?.metafieldsSet?.userErrors?.length > 0)) {
-      console.error('GraphQL errors:', data.errors || data.data?.metafieldsSet?.userErrors);
-      return res.status(500).json({ 
-        error: 'Failed to save wishlist',
-        details: data.errors || data.data?.metafieldsSet?.userErrors
-      });
     }
+    
+    if (!customerId) {
+      return res.status(401).json({ error: 'Unauthorized - Please log in' });
+    }
+
+    const { wishlist } = req.body;
+
+    if (!wishlist || !Array.isArray(wishlist)) {
+      return res.status(400).json({ error: 'Missing or invalid wishlist array' });
+    }
+
+    // Save to MongoDB
+    const wishlistData = {
+      customerId: customerId,
+      productIds: wishlist.map(id => String(id)), // Ensure all IDs are strings
+      updatedAt: new Date().toISOString()
+    };
+
+    // Upsert wishlist (create if doesn't exist, update if exists)
+    await db.collection('wishlists').updateOne(
+      { customerId: customerId },
+      { 
+        $set: wishlistData,
+        $setOnInsert: { createdAt: new Date().toISOString() }
+      },
+      { upsert: true }
+    );
 
     res.json({ 
       success: true, 
@@ -446,82 +455,64 @@ app.post('/api/wishlist', async (req, res) => {
   }
 });
 
-// Get wishlist endpoint (for loading wishlist)
+// Get wishlist endpoint (updated to use MongoDB and JWT)
 app.get('/api/wishlist/get', async (req, res) => {
   try {
-    // Simple authentication check
-    const authHeader = req.headers['x-api-key'];
-    if (authHeader !== API_SECRET) {
-      return res.status(401).json({ error: 'Unauthorized' });
+    await ensureMongoConnection();
+    
+    if (!db) {
+      return res.json({ success: true, wishlist: [] }); // Return empty instead of error
     }
 
-    const customerId = req.query.customer_id;
+    // Check for JWT token (custom auth) first
+    let customerId = null;
+    const authHeader = req.headers['authorization'];
+    
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.split(' ')[1];
+      try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        customerId = decoded.customerId;
+      } catch (jwtError) {
+        // JWT invalid - check for legacy API key auth
+        console.warn('JWT token invalid, checking legacy auth:', jwtError.message);
+      }
+    }
+    
+    // Legacy support: Check for API key auth and customer_id query param
     if (!customerId) {
-      return res.status(400).json({ error: 'Missing customer_id' });
-    }
-
-    // Query Shopify Admin API to get customer metafield
-    const query = `
-      query getCustomerMetafield($id: ID!) {
-        customer(id: $id) {
-          id
-          metafields(first: 1, namespace: "custom", keys: ["wishlist"]) {
-            edges {
-              node {
-                id
-                key
-                value
-              }
-            }
+      const apiKeyHeader = req.headers['x-api-key'];
+      if (apiKeyHeader === API_SECRET) {
+        const queryCustomerId = req.query.customer_id;
+        if (queryCustomerId) {
+          // Try to find MongoDB customer by shopifyCustomerId
+          const customer = await db.collection('customers').findOne({ 
+            shopifyCustomerId: queryCustomerId.toString() 
+          });
+          if (customer) {
+            customerId = customer._id.toString();
           }
         }
       }
-    `;
-
-    const response = await fetch(`https://${SHOPIFY_SHOP}/admin/api/2024-01/graphql.json`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
-      },
-      body: JSON.stringify({
-        query: query,
-        variables: { id: `gid://shopify/Customer/${customerId}` }
-      })
-    });
-
-    const data = await response.json();
-
-    if (data.errors) {
-      console.error('GraphQL errors:', data.errors);
-      // Don't return 500 - return empty wishlist instead
-      return res.json({ 
-        success: true,
-        wishlist: [],
-        warning: 'Could not fetch from metafield'
-      });
     }
-
-    // Check if customer exists
-    if (!data.data?.customer) {
-      console.warn('Customer not found:', customerId);
+    
+    if (!customerId) {
+      // No authentication - return empty wishlist (guest mode)
       return res.json({ success: true, wishlist: [] });
     }
 
-    const metafield = data.data?.customer?.metafields?.edges?.[0]?.node;
-    if (metafield && metafield.value) {
-      try {
-        const wishlist = JSON.parse(metafield.value);
-        res.json({ 
-          success: true, 
-          wishlist: Array.isArray(wishlist) ? wishlist : []
-        });
-      } catch (e) {
-        console.error('Error parsing metafield value:', e);
-        res.json({ success: true, wishlist: [] });
-      }
+    // Fetch wishlist from MongoDB
+    const wishlistDoc = await db.collection('wishlists').findOne({ 
+      customerId: customerId 
+    });
+
+    if (wishlistDoc && wishlistDoc.productIds) {
+      res.json({ 
+        success: true, 
+        wishlist: Array.isArray(wishlistDoc.productIds) ? wishlistDoc.productIds : []
+      });
     } else {
-      // Metafield doesn't exist yet - return empty array (not an error)
+      // No wishlist found - return empty array
       res.json({ success: true, wishlist: [] });
     }
 
