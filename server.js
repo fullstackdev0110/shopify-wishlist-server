@@ -2726,6 +2726,362 @@ app.delete('/api/staff/:id', async (req, res) => {
   }
 });
 
+// Validate Excel file before import (admin) - returns validation results without importing
+app.post('/api/products/validate-excel', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { fileData, fileName } = req.body;
+
+    if (!fileData) {
+      return res.status(400).json({ error: 'No file data provided' });
+    }
+
+    // Decode base64
+    const buffer = Buffer.from(fileData, 'base64');
+    const workbook = XLSX.read(buffer, { type: 'buffer' });
+    const sheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[sheetName];
+    
+    // Reuse the same parsing logic from import-excel
+    const range = XLSX.utils.decode_range(worksheet['!ref'] || 'A1');
+    let mainHeaderRowIndex = -1;
+    let subHeaderRowIndex = -1;
+    let mainHeaderRow = null;
+    let subHeaderRow = null;
+    
+    // Find headers (same logic as import)
+    for (let row = 0; row <= Math.min(4, range.e.r); row++) {
+      const rowData = [];
+      for (let col = range.s.c; col <= range.e.c; col++) {
+        const cellAddress = XLSX.utils.encode_cell({ r: row, c: col });
+        const cell = worksheet[cellAddress];
+        const value = cell ? (cell.v !== undefined ? String(cell.v).trim() : '') : '';
+        rowData.push(value);
+      }
+      
+      const hasDevice = rowData.some(cell => /^device$/i.test(cell));
+      const hasBrand = rowData.some(cell => /^brand$/i.test(cell));
+      const hasModel = rowData.some(cell => /^model$/i.test(cell));
+      const hasExcellent = rowData.some(cell => /^excellent$/i.test(cell));
+      const hasGood = rowData.some(cell => /^good$/i.test(cell));
+      const hasFair = rowData.some(cell => /^fair$/i.test(cell));
+      const hasFaulty = rowData.some(cell => /^faulty$/i.test(cell));
+      
+      if (hasDevice && hasBrand && hasModel && (hasExcellent || hasGood || hasFair || hasFaulty)) {
+        mainHeaderRowIndex = row;
+        mainHeaderRow = rowData;
+        
+        if (row + 1 <= range.e.r) {
+          const subRowData = [];
+          for (let col = range.s.c; col <= range.e.c; col++) {
+            const cellAddress = XLSX.utils.encode_cell({ r: row + 1, c: col });
+            const cell = worksheet[cellAddress];
+            subRowData.push(cell ? (cell.v !== undefined ? String(cell.v).trim() : '') : '');
+          }
+          subHeaderRowIndex = row + 1;
+          subHeaderRow = subRowData;
+        }
+        break;
+      }
+    }
+    
+    if (mainHeaderRowIndex === -1) {
+      mainHeaderRowIndex = 0;
+      subHeaderRowIndex = 1;
+      const firstRow = [];
+      const secondRow = [];
+      for (let col = range.s.c; col <= range.e.c; col++) {
+        const cellAddress1 = XLSX.utils.encode_cell({ r: 0, c: col });
+        const cellAddress2 = XLSX.utils.encode_cell({ r: 1, c: col });
+        const cell1 = worksheet[cellAddress1];
+        const cell2 = worksheet[cellAddress2];
+        firstRow.push(cell1 ? (cell1.v !== undefined ? String(cell1.v).trim() : '') : '');
+        secondRow.push(cell2 ? (cell2.v !== undefined ? String(cell2.v).trim() : '') : '');
+      }
+      mainHeaderRow = firstRow;
+      subHeaderRow = secondRow;
+    }
+    
+    // Build column mapping (same as import)
+    const columnMapping = [];
+    const columnConditionByIndex = {};
+    let currentCondition = null;
+    
+    const conditionStarts = {};
+    for (let col = range.s.c; col <= range.e.c; col++) {
+      const colIdx = col - range.s.c;
+      const mainHeader = mainHeaderRow[colIdx] || '';
+      const mainUpper = mainHeader.toUpperCase().trim();
+      
+      if (mainUpper === 'EXCELLENT' && !conditionStarts['Excellent']) {
+        conditionStarts['Excellent'] = colIdx;
+      } else if (mainUpper === 'GOOD' && !conditionStarts['Good']) {
+        conditionStarts['Good'] = colIdx;
+      } else if (mainUpper === 'FAIR' && !conditionStarts['Fair']) {
+        conditionStarts['Fair'] = colIdx;
+      } else if (mainUpper === 'FAULTY' && !conditionStarts['Faulty']) {
+        conditionStarts['Faulty'] = colIdx;
+      }
+    }
+    
+    const conditionEnds = {};
+    const sortedConditions = Object.entries(conditionStarts).sort((a, b) => a[1] - b[1]);
+    for (let i = 0; i < sortedConditions.length; i++) {
+      const [condition, startIdx] = sortedConditions[i];
+      if (i < sortedConditions.length - 1) {
+        conditionEnds[condition] = sortedConditions[i + 1][1];
+      } else {
+        let endIdx = range.e.c - range.s.c + 1;
+        for (let col = range.s.c; col <= range.e.c; col++) {
+          const colIdx = col - range.s.c;
+          const mainHeader = mainHeaderRow[colIdx] || '';
+          const mainUpper = mainHeader.toUpperCase().trim();
+          if (mainUpper.includes('IMAGE') || mainUpper.includes('URL') || mainUpper.includes('IMG')) {
+            endIdx = colIdx;
+            break;
+          }
+        }
+        conditionEnds[condition] = endIdx;
+      }
+    }
+    
+    for (let col = range.s.c; col <= range.e.c; col++) {
+      const colIdx = col - range.s.c;
+      const mainHeader = mainHeaderRow[colIdx] || '';
+      const subHeader = subHeaderRow && subHeaderRow[colIdx] ? subHeaderRow[colIdx] : '';
+      
+      const mainUpper = mainHeader.toUpperCase().trim();
+      let columnName;
+      
+      if (mainUpper === 'EXCELLENT' || mainUpper === 'GOOD' || mainUpper === 'FAIR' || mainUpper === 'FAULTY') {
+        if (mainUpper === 'EXCELLENT') currentCondition = 'Excellent';
+        else if (mainUpper === 'GOOD') currentCondition = 'Good';
+        else if (mainUpper === 'FAIR') currentCondition = 'Fair';
+        else if (mainUpper === 'FAULTY') currentCondition = 'Faulty';
+        
+        columnName = subHeader || mainHeader || `__EMPTY_${colIdx}`;
+        if (currentCondition) {
+          columnConditionByIndex[colIdx] = currentCondition;
+        }
+      } else {
+        let belongsToCondition = null;
+        for (const [condition, startIdx] of Object.entries(conditionStarts)) {
+          const endIdx = conditionEnds[condition] || (range.e.c - range.s.c + 1);
+          if (colIdx >= startIdx && colIdx < endIdx) {
+            belongsToCondition = condition;
+            break;
+          }
+        }
+        
+        if (belongsToCondition) {
+          if (subHeader) {
+            columnName = subHeader;
+            columnConditionByIndex[colIdx] = belongsToCondition;
+          } else {
+            columnName = mainHeader || `__EMPTY_${colIdx}`;
+            if (mainHeader && mainHeader.trim() !== '') {
+              columnConditionByIndex[colIdx] = belongsToCondition;
+            }
+          }
+          currentCondition = belongsToCondition;
+        } else {
+          columnName = mainHeader || subHeader || `__EMPTY_${colIdx}`;
+          if (mainUpper && mainUpper !== '' && !mainUpper.includes('EMPTY') && !mainUpper.includes('IMAGE') && !mainUpper.includes('URL')) {
+            currentCondition = null;
+          }
+        }
+      }
+      
+      columnMapping.push(columnName);
+    }
+    
+    // Read data rows
+    const dataStartRow = subHeaderRowIndex !== -1 ? subHeaderRowIndex + 1 : mainHeaderRowIndex + 1;
+    const allRows = [];
+    for (let row = dataStartRow; row <= range.e.r; row++) {
+      const rowData = {};
+      const rowDataByIndex = {};
+      for (let col = range.s.c; col <= range.e.c; col++) {
+        const colIdx = col - range.s.c;
+        const cellAddress = XLSX.utils.encode_cell({ r: row, c: col });
+        const cell = worksheet[cellAddress];
+        const value = cell ? (cell.v !== undefined ? String(cell.v).trim() : '') : '';
+        const headerName = columnMapping[colIdx] || `__EMPTY_${colIdx}`;
+        
+        rowData[headerName] = value;
+        rowDataByIndex[colIdx] = value;
+      }
+      rowData._byIndex = rowDataByIndex;
+      if (Object.values(rowData).some(v => v && v !== '' && v !== rowDataByIndex)) {
+        allRows.push(rowData);
+      }
+    }
+    
+    const data = allRows;
+    
+    // Helper function to find column value
+    const getColumnValue = (row, possibleNames) => {
+      for (const name of possibleNames) {
+        if (row[name] !== undefined && row[name] !== null && row[name] !== '') {
+          return row[name];
+        }
+        const rowKeys = Object.keys(row);
+        const matchedKey = rowKeys.find(key => key.toLowerCase().trim() === name.toLowerCase().trim());
+        if (matchedKey && row[matchedKey] !== undefined && row[matchedKey] !== null && row[matchedKey] !== '') {
+          return row[matchedKey];
+        }
+      }
+      return null;
+    };
+    
+    // Validation logic
+    const errors = [];
+    const previewData = [];
+    const storageOptions = ['64GB', '128GB', '256GB', '512GB', '1TB', '2TB'];
+    
+    // URL validation regex
+    const urlRegex = /^(https?:\/\/|www\.)[^\s/$.?#].[^\s]*$/i;
+    
+    for (let i = 0; i < data.length; i++) {
+      const row = data[i];
+      const excelRowNumber = dataStartRow + i + 1; // Excel row number (1-based, including headers)
+      const rowErrors = [];
+      
+      // Get basic info
+      const brand = getColumnValue(row, ['Brand', 'brand', 'Brand Name', 'BRAND', 'BrandName']);
+      const model = getColumnValue(row, ['Model', 'model', 'Product Model', 'MODEL', 'ModelName', 'Product']);
+      const deviceType = (getColumnValue(row, ['Device Type', 'deviceType', 'DeviceType', 'Device', 'device', 'DEVICE', 'Type', 'type']) || 'phone').toLowerCase();
+      const color = getColumnValue(row, ['Color', 'color', 'Colour', 'colour', 'COLOR']) || null;
+      
+      // Find image URL column
+      let imageUrl = null;
+      const imageColumnNames = ['Image URL', 'imageUrl', 'ImageUrl', 'Image', 'image', 'Image Link', 'imageLink', 'image_url', 'IMAGE_URL'];
+      
+      for (const colName of imageColumnNames) {
+        const val = getColumnValue(row, [colName]);
+        if (val && val.trim() !== '') {
+          imageUrl = val.trim();
+          break;
+        }
+      }
+      
+      if (!imageUrl) {
+        const allCols = Object.keys(row);
+        for (const col of allCols) {
+          const colLower = col.toLowerCase();
+          if ((colLower.includes('image') || colLower.includes('img') || (colLower.includes('url') && !colLower.includes('excellent') && !colLower.includes('good') && !colLower.includes('fair') && !colLower.includes('faulty'))) && 
+              row[col] && row[col] !== null && row[col] !== undefined && row[col].toString().trim() !== '') {
+            imageUrl = row[col].toString().trim();
+            break;
+          }
+        }
+      }
+      
+      // Validate required fields
+      if (!brand || !model) {
+        const missing = [];
+        if (!brand) missing.push('Brand');
+        if (!model) missing.push('Model');
+        rowErrors.push({
+          column: missing.join(', '),
+          error: `Missing required fields: ${missing.join(', ')}`
+        });
+      }
+      
+      // Validate image URL format if provided
+      if (imageUrl && !urlRegex.test(imageUrl)) {
+        rowErrors.push({
+          column: 'Image URL',
+          error: 'Is not a valid http url'
+        });
+      }
+      
+      // Validate price columns (check all storage options and conditions)
+      const allColumns = Object.keys(row);
+      const columnNameToIndex = {};
+      columnMapping.forEach((colName, idx) => {
+        if (!columnNameToIndex[colName]) {
+          columnNameToIndex[colName] = [];
+        }
+        columnNameToIndex[colName].push(idx);
+      });
+      
+      for (let storageIdx = 0; storageIdx < storageOptions.length; storageIdx++) {
+        const storage = storageOptions[storageIdx];
+        const storageNormalized = storage.toUpperCase().replace(/\s+/g, '');
+        
+        const matchingIndices = [];
+        columnMapping.forEach((colName, idx) => {
+          const colUpper = colName.toUpperCase().replace(/\s+/g, '');
+          if (colUpper === storageNormalized || 
+              colUpper.includes(storageNormalized) || 
+              storageNormalized.includes(colUpper)) {
+            matchingIndices.push(idx);
+          }
+        });
+        
+        for (const colIdx of matchingIndices) {
+          const condition = columnConditionByIndex[colIdx];
+          const colName = columnMapping[colIdx];
+          
+          const cellValue = row._byIndex && row._byIndex[colIdx] !== undefined 
+            ? row._byIndex[colIdx] 
+            : row[colName];
+          
+          if (condition && cellValue !== undefined && cellValue !== null && cellValue !== '') {
+            const val = parseFloat(cellValue);
+            if (isNaN(val) || val < 0) {
+              rowErrors.push({
+                column: `${condition} - ${colName}`,
+                error: 'Is not a number'
+              });
+            }
+          }
+        }
+      }
+      
+      // Add row errors to main errors array
+      rowErrors.forEach(err => {
+        errors.push({
+          row: excelRowNumber,
+          column: err.column,
+          error: err.error
+        });
+      });
+      
+      // Add to preview data (include all fields for display)
+      previewData.push({
+        row: excelRowNumber,
+        brand: brand || '',
+        model: model || '',
+        deviceType: deviceType || '',
+        color: color || '',
+        imageUrl: imageUrl || '',
+        hasErrors: rowErrors.length > 0,
+        errors: rowErrors
+      });
+    }
+    
+    res.json({
+      success: true,
+      fileName: fileName || 'import.xlsx',
+      totalRows: data.length,
+      errorCount: errors.length,
+      validRows: data.length - errors.length,
+      errors: errors,
+      previewData: previewData
+    });
+
+  } catch (error) {
+    console.error('Error validating Excel:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
 // Import Excel file (admin)
 app.post('/api/products/import-excel', async (req, res) => {
   try {
