@@ -1302,8 +1302,13 @@ app.get('/api/products/trade-in', async (req, res) => {
       query.deviceType = deviceType.toLowerCase();
     }
 
-    // Fetch products from MongoDB
-    let products = await db.collection('trade_in_products').find(query).toArray();
+    // Fetch products from MongoDB, sorted by sortOrder first, then brand/model/storage
+    let products = await db.collection('trade_in_products').find(query).sort({ 
+      sortOrder: 1, 
+      brand: 1, 
+      model: 1, 
+      storage: 1 
+    }).toArray();
     
     // Auto-generate slugs for products that don't have one
     const updatePromises = [];
@@ -1367,7 +1372,8 @@ app.get('/api/products/trade-in', async (req, res) => {
           tags: [product.deviceType || 'phone', 'trade-in'],
           featuredImage: productImage,
           images: [productImage],
-          variants: []
+          variants: [],
+          sortOrder: product.sortOrder !== undefined ? product.sortOrder : 999999 // Preserve sortOrder for sorting
         };
       } else {
         // If product group exists but doesn't have an image yet, use this product's image or default
@@ -1416,7 +1422,14 @@ app.get('/api/products/trade-in', async (req, res) => {
 
     const productArray = Object.values(transformedProducts);
     
-    console.log(`✅ Transformed to ${productArray.length} grouped products (by brand/model)`);
+    // Sort by sortOrder to maintain the order set in admin
+    productArray.sort((a, b) => {
+      const aOrder = a.sortOrder !== undefined ? a.sortOrder : 999999;
+      const bOrder = b.sortOrder !== undefined ? b.sortOrder : 999999;
+      return aOrder - bOrder;
+    });
+    
+    console.log(`✅ Transformed to ${productArray.length} grouped products (by brand/model), sorted by sortOrder`);
     if (productArray.length > 0) {
       console.log(`📱 Sample transformed product:`, {
         title: productArray[0].title,
@@ -1461,7 +1474,35 @@ app.get('/api/products/admin', async (req, res) => {
       return res.status(500).json({ error: 'Database connection failed' });
     }
 
-    let products = await db.collection('trade_in_products').find({}).sort({ brand: 1, model: 1, storage: 1 }).toArray();
+    // Initialize sortOrder for products that don't have it (use sequential numbers)
+    const productsWithoutSortOrder = await db.collection('trade_in_products')
+      .find({ sortOrder: { $exists: false } })
+      .toArray();
+    
+    if (productsWithoutSortOrder.length > 0) {
+      // Get max sortOrder or use 0 if none exists
+      const maxSortResult = await db.collection('trade_in_products')
+        .find({ sortOrder: { $exists: true } }, { sort: { sortOrder: -1 }, limit: 1 })
+        .toArray();
+      let nextSortOrder = maxSortResult.length > 0 ? maxSortResult[0].sortOrder + 1 : 1;
+      
+      // Update all products without sortOrder
+      for (const product of productsWithoutSortOrder) {
+        await db.collection('trade_in_products').updateOne(
+          { _id: product._id },
+          { $set: { sortOrder: nextSortOrder } }
+        );
+        nextSortOrder++;
+      }
+      console.log(`✅ Admin: Initialized sortOrder for ${productsWithoutSortOrder.length} products`);
+    }
+    
+    let products = await db.collection('trade_in_products').find({}).sort({ 
+      sortOrder: 1, 
+      brand: 1, 
+      model: 1, 
+      storage: 1 
+    }).toArray();
     
     // Auto-generate slugs for products that don't have one
     const updatePromises = [];
@@ -1727,6 +1768,11 @@ app.post('/api/products/admin', async (req, res) => {
       // Update existing - get old data for audit
       const oldProduct = await db.collection('trade_in_products').findOne({ _id: new ObjectId(id) });
       
+      // Preserve sortOrder from old product if it exists
+      if (oldProduct && oldProduct.sortOrder !== undefined) {
+        productData.sortOrder = oldProduct.sortOrder;
+      }
+      
       const result = await db.collection('trade_in_products').updateOne(
         { _id: new ObjectId(id) },
         { $set: productData }
@@ -1764,7 +1810,15 @@ app.post('/api/products/admin', async (req, res) => {
       
       res.json({ success: true, updated: result.modifiedCount > 0, id });
     } else {
-      // Create new
+      // Create new - set sortOrder to end of list (get max sortOrder + 1)
+      const maxSortOrder = await db.collection('trade_in_products')
+        .find({}, { sort: { sortOrder: -1 }, limit: 1 })
+        .toArray();
+      const nextSortOrder = maxSortOrder.length > 0 && maxSortOrder[0].sortOrder !== undefined 
+        ? maxSortOrder[0].sortOrder + 1 
+        : Date.now(); // Use timestamp if no sortOrder exists
+      productData.sortOrder = nextSortOrder;
+      
       productData.createdAt = new Date().toISOString();
       productData.createdBy = staffIdentifier;
       const result = await db.collection('trade_in_products').insertOne(productData);
@@ -1844,6 +1898,7 @@ app.put('/api/products/admin/:id', async (req, res) => {
     const firstColor = colorsArray.length > 0 ? colorsArray[0] : null;
     const slug = generateProductSlug(brand, model, storage, firstColor);
     
+    // Preserve sortOrder when updating (don't change it)
     const productData = {
       brand: brand.trim(),
       model: model.trim(),
@@ -1856,8 +1911,14 @@ app.put('/api/products/admin/:id', async (req, res) => {
       slug: slug, // SEO-friendly URL slug
       updatedAt: new Date().toISOString(),
       lastEditedBy: staffIdentifier
+      // Note: sortOrder is NOT included here - it will be preserved from oldProduct
     };
 
+    // Preserve sortOrder from old product if it exists
+    if (oldProduct.sortOrder !== undefined) {
+      productData.sortOrder = oldProduct.sortOrder;
+    }
+    
     const result = await db.collection('trade_in_products').updateOne(
       { _id: new ObjectId(id) },
       { $set: productData }
@@ -1904,6 +1965,65 @@ app.put('/api/products/admin/:id', async (req, res) => {
 
   } catch (error) {
     console.error('Error updating product:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Update product sort order (admin)
+app.put('/api/products/admin/sort-order', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    const { productIds } = req.body; // Array of product IDs in the new order
+    const staffIdentifier = req.headers['x-staff-identifier'] || req.body.staffIdentifier || 'Unknown';
+
+    if (!Array.isArray(productIds) || productIds.length === 0) {
+      return res.status(400).json({ error: 'productIds must be a non-empty array' });
+    }
+
+    // Check permission
+    if (!await hasPermission(staffIdentifier, 'pricingEdit')) {
+      return res.status(403).json({ 
+        error: 'Permission denied. You need "pricingEdit" permission to reorder products.' 
+      });
+    }
+
+    // Update sortOrder for each product based on its position in the array
+    const updatePromises = productIds.map((productId, index) => {
+      return db.collection('trade_in_products').updateOne(
+        { _id: new ObjectId(productId) },
+        { $set: { sortOrder: index + 1 } }
+      );
+    });
+
+    await Promise.all(updatePromises);
+
+    // Log audit trail
+    await logAudit({
+      action: 'reorder_products',
+      resourceType: 'products',
+      resourceId: 'multiple',
+      staffIdentifier: staffIdentifier,
+      changes: [{
+        field: 'sortOrder',
+        old: 'previous order',
+        new: `reordered ${productIds.length} products`,
+        description: `Reordered ${productIds.length} products`
+      }]
+    });
+
+    res.json({ success: true, message: `Updated sort order for ${productIds.length} products` });
+
+  } catch (error) {
+    console.error('Error updating product sort order:', error);
     res.status(500).json({ error: 'Internal server error', message: error.message });
   }
 });
