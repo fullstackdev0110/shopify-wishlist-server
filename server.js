@@ -1846,6 +1846,65 @@ app.post('/api/products/admin', async (req, res) => {
   }
 });
 
+// Update product sort order (admin) - MUST come before /:id route
+app.put('/api/products/admin/sort-order', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    const { productIds } = req.body; // Array of product IDs in the new order
+    const staffIdentifier = req.headers['x-staff-identifier'] || req.body.staffIdentifier || 'Unknown';
+
+    if (!Array.isArray(productIds) || productIds.length === 0) {
+      return res.status(400).json({ error: 'productIds must be a non-empty array' });
+    }
+
+    // Check permission
+    if (!await hasPermission(staffIdentifier, 'pricingEdit')) {
+      return res.status(403).json({ 
+        error: 'Permission denied. You need "pricingEdit" permission to reorder products.' 
+      });
+    }
+
+    // Update sortOrder for each product based on its position in the array
+    const updatePromises = productIds.map((productId, index) => {
+      return db.collection('trade_in_products').updateOne(
+        { _id: new ObjectId(productId) },
+        { $set: { sortOrder: index + 1 } }
+      );
+    });
+
+    await Promise.all(updatePromises);
+
+    // Log audit trail
+    await logAudit({
+      action: 'reorder_products',
+      resourceType: 'products',
+      resourceId: 'multiple',
+      staffIdentifier: staffIdentifier,
+      changes: [{
+        field: 'sortOrder',
+        old: 'previous order',
+        new: `reordered ${productIds.length} products`,
+        description: `Reordered ${productIds.length} products`
+      }]
+    });
+
+    res.json({ success: true, message: `Updated sort order for ${productIds.length} products` });
+
+  } catch (error) {
+    console.error('Error updating product sort order:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
 // Update product (admin)
 app.put('/api/products/admin/:id', async (req, res) => {
   try {
@@ -1965,65 +2024,6 @@ app.put('/api/products/admin/:id', async (req, res) => {
 
   } catch (error) {
     console.error('Error updating product:', error);
-    res.status(500).json({ error: 'Internal server error', message: error.message });
-  }
-});
-
-// Update product sort order (admin)
-app.put('/api/products/admin/sort-order', async (req, res) => {
-  try {
-    const authHeader = req.headers['x-api-key'];
-    if (authHeader !== API_SECRET) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    await ensureMongoConnection();
-    if (!db) {
-      return res.status(500).json({ error: 'Database connection failed' });
-    }
-
-    const { productIds } = req.body; // Array of product IDs in the new order
-    const staffIdentifier = req.headers['x-staff-identifier'] || req.body.staffIdentifier || 'Unknown';
-
-    if (!Array.isArray(productIds) || productIds.length === 0) {
-      return res.status(400).json({ error: 'productIds must be a non-empty array' });
-    }
-
-    // Check permission
-    if (!await hasPermission(staffIdentifier, 'pricingEdit')) {
-      return res.status(403).json({ 
-        error: 'Permission denied. You need "pricingEdit" permission to reorder products.' 
-      });
-    }
-
-    // Update sortOrder for each product based on its position in the array
-    const updatePromises = productIds.map((productId, index) => {
-      return db.collection('trade_in_products').updateOne(
-        { _id: new ObjectId(productId) },
-        { $set: { sortOrder: index + 1 } }
-      );
-    });
-
-    await Promise.all(updatePromises);
-
-    // Log audit trail
-    await logAudit({
-      action: 'reorder_products',
-      resourceType: 'products',
-      resourceId: 'multiple',
-      staffIdentifier: staffIdentifier,
-      changes: [{
-        field: 'sortOrder',
-        old: 'previous order',
-        new: `reordered ${productIds.length} products`,
-        description: `Reordered ${productIds.length} products`
-      }]
-    });
-
-    res.json({ success: true, message: `Updated sort order for ${productIds.length} products` });
-
-  } catch (error) {
-    console.error('Error updating product sort order:', error);
     res.status(500).json({ error: 'Internal server error', message: error.message });
   }
 });
