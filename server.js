@@ -7557,6 +7557,7 @@ if (require.main === module) {
     // Initialize backup scheduler after server starts
     setTimeout(initializeBackupScheduler, 2000);
   });
+  
 } else {
   // For serverless (Vercel), initialize scheduler after a delay
   setTimeout(initializeBackupScheduler, 3000);
