@@ -1352,8 +1352,9 @@ app.get('/api/products/trade-in', async (req, res) => {
 
     // Transform to match frontend expected format
     const transformedProducts = products.reduce((acc, product) => {
-      // Group by brand and model
-      const key = `${product.brand}_${product.model}`;
+      // Group by brand, model, and deviceType (to match admin panel grouping)
+      // This ensures the order matches exactly with the admin panel
+      const key = `${product.brand}_${product.model}_${product.deviceType || 'phone'}`;
       
       if (!acc[key]) {
         // Use product image or default image based on device type
@@ -1365,6 +1366,10 @@ app.get('/api/products/trade-in', async (req, res) => {
           height: 800
         };
         
+        // Use this product's sortOrder (products are already sorted by sortOrder from DB)
+        // Since products come sorted, the first product in a group has the lowest sortOrder
+        const productSortOrder = product.sortOrder !== undefined ? product.sortOrder : 999999;
+        
         acc[key] = {
           id: product._id.toString(),
           gid: `gid://database/Product/${product._id}`,
@@ -1375,9 +1380,17 @@ app.get('/api/products/trade-in', async (req, res) => {
           featuredImage: productImage,
           images: [productImage],
           variants: [],
-          sortOrder: product.sortOrder !== undefined ? product.sortOrder : 999999 // Preserve sortOrder for sorting
+          sortOrder: productSortOrder // Use first product's sortOrder (products are pre-sorted)
         };
       } else {
+        // If product group exists, update sortOrder to minimum (to match admin panel behavior)
+        const productSortOrder = product.sortOrder !== undefined ? product.sortOrder : 999999;
+        const currentSortOrder = acc[key].sortOrder !== undefined ? acc[key].sortOrder : 999999;
+        // Use the minimum sortOrder so the group appears in the earliest position
+        if (productSortOrder < currentSortOrder) {
+          acc[key].sortOrder = productSortOrder;
+        }
+        
         // If product group exists but doesn't have an image yet, use this product's image or default
         if (!acc[key].featuredImage || !product.imageUrl) {
           const imageUrl = product.imageUrl || getDefaultImageUrl(product.deviceType);
@@ -1431,7 +1444,16 @@ app.get('/api/products/trade-in', async (req, res) => {
       return aOrder - bOrder;
     });
     
-    console.log(`✅ Transformed to ${productArray.length} grouped products (by brand/model), sorted by sortOrder`);
+    console.log(`✅ Transformed to ${productArray.length} grouped products (by brand/model/deviceType), sorted by sortOrder`);
+    
+    // Log first few products with their sortOrder for debugging
+    if (productArray.length > 0) {
+      console.log(`📊 First 5 products order:`, productArray.slice(0, 5).map(p => ({
+        title: p.title,
+        vendor: p.vendor,
+        sortOrder: p.sortOrder
+      })));
+    }
     if (productArray.length > 0) {
       console.log(`📱 Sample transformed product:`, {
         title: productArray[0].title,
