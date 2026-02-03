@@ -1849,7 +1849,8 @@ app.post('/api/products/admin', async (req, res) => {
 });
 
 // Update product sort order (admin) - MUST come before /:id route
-app.put('/api/products/admin/sort-order', async (req, res) => {
+// Use both PUT and POST to handle different client configurations
+app.put('/api/products/admin/sort-order', express.json({ limit: '10mb' }), async (req, res) => {
   try {
     const authHeader = req.headers['x-api-key'];
     if (authHeader !== API_SECRET) {
@@ -1880,6 +1881,121 @@ app.put('/api/products/admin/sort-order', async (req, res) => {
     if (req.rawBody) {
       console.log('📥 Raw body:', req.rawBody);
     }
+    
+    // Try to get productIds from body - handle different possible formats
+    let productIds = req.body?.productIds;
+    
+    // Fallback: if productIds is not directly in body, check if body itself is the array
+    if (!productIds && Array.isArray(req.body)) {
+      productIds = req.body;
+    }
+    
+    // Fallback: if body is a string, try to parse it
+    if (!productIds && typeof req.body === 'string') {
+      try {
+        const parsed = JSON.parse(req.body);
+        productIds = parsed.productIds || parsed;
+      } catch (e) {
+        console.error('❌ Failed to parse body as JSON:', e);
+      }
+    }
+    
+    // Additional check: if body is empty object, the JSON parser might have failed
+    if (!productIds && req.body && typeof req.body === 'object' && Object.keys(req.body).length === 0) {
+      console.error('❌ Body is empty object - JSON parsing may have failed');
+      console.error('❌ Content-Type header:', req.headers['content-type']);
+      console.error('❌ Request method:', req.method);
+    }
+    
+    const staffIdentifier = req.headers['x-staff-identifier'] || req.body?.staffIdentifier || 'Unknown';
+
+    if (!Array.isArray(productIds) || productIds.length === 0) {
+      console.error('❌ Invalid productIds:', {
+        productIds,
+        isArray: Array.isArray(productIds),
+        length: productIds?.length,
+        type: typeof productIds,
+        body: req.body,
+        bodyType: typeof req.body,
+        bodyKeys: Object.keys(req.body || {})
+      });
+      return res.status(400).json({ 
+        error: 'productIds must be a non-empty array',
+        received: {
+          body: req.body,
+          productIds: req.body?.productIds,
+          bodyType: typeof req.body
+        }
+      });
+    }
+
+    // Check permission
+    if (!await hasPermission(staffIdentifier, 'pricingEdit')) {
+      return res.status(403).json({ 
+        error: 'Permission denied. You need "pricingEdit" permission to reorder products.' 
+      });
+    }
+
+    // Update sortOrder for each product based on its position in the array
+    const updatePromises = productIds.map((productId, index) => {
+      return db.collection('trade_in_products').updateOne(
+        { _id: new ObjectId(productId) },
+        { $set: { sortOrder: index + 1 } }
+      );
+    });
+
+    await Promise.all(updatePromises);
+
+    // Log audit trail
+    await logAudit({
+      action: 'reorder_products',
+      resourceType: 'products',
+      resourceId: 'multiple',
+      staffIdentifier: staffIdentifier,
+      changes: [{
+        field: 'sortOrder',
+        old: 'previous order',
+        new: `reordered ${productIds.length} products`,
+        description: `Reordered ${productIds.length} products`
+      }]
+    });
+
+    res.json({ success: true, message: `Updated sort order for ${productIds.length} products` });
+
+  } catch (error) {
+    console.error('Error updating product sort order:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Also support POST for sort-order (fallback for clients that have issues with PUT)
+app.post('/api/products/admin/sort-order', express.json({ limit: '10mb' }), async (req, res) => {
+  // Reuse the same handler logic
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    // Debug: Log request body to see what we're receiving
+    console.log('📥 Sort order request received (POST)');
+    console.log('📥 Request headers:', {
+      'content-type': req.headers['content-type'],
+      'x-api-key': req.headers['x-api-key'] ? 'present' : 'missing',
+      'x-staff-identifier': req.headers['x-staff-identifier']
+    });
+    console.log('📥 Request body:', req.body);
+    console.log('📥 Request body type:', typeof req.body);
+    console.log('📥 Request body keys:', Object.keys(req.body || {}));
+    console.log('📥 productIds:', req.body?.productIds);
+    console.log('📥 productIds type:', typeof req.body?.productIds);
+    console.log('📥 productIds isArray:', Array.isArray(req.body?.productIds));
+    console.log('📥 productIds length:', Array.isArray(req.body?.productIds) ? req.body.productIds.length : 'N/A');
     
     // Try to get productIds from body - handle different possible formats
     let productIds = req.body?.productIds;
