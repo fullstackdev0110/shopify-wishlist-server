@@ -1860,28 +1860,63 @@ app.put('/api/products/admin/sort-order', async (req, res) => {
     }
 
     // Debug: Log request body to see what we're receiving
-    console.log('📥 Sort order request received:', {
-      body: req.body,
-      bodyType: typeof req.body,
-      bodyKeys: Object.keys(req.body || {}),
-      productIds: req.body?.productIds,
-      productIdsType: typeof req.body?.productIds,
-      isArray: Array.isArray(req.body?.productIds),
-      productIdsLength: Array.isArray(req.body?.productIds) ? req.body.productIds.length : 'N/A',
-      contentType: req.headers['content-type']
+    console.log('📥 Sort order request received');
+    console.log('📥 Request headers:', {
+      'content-type': req.headers['content-type'],
+      'x-api-key': req.headers['x-api-key'] ? 'present' : 'missing',
+      'x-staff-identifier': req.headers['x-staff-identifier']
     });
+    console.log('📥 Request body:', req.body);
+    console.log('📥 Request body type:', typeof req.body);
+    console.log('📥 Request body keys:', Object.keys(req.body || {}));
+    console.log('📥 productIds:', req.body?.productIds);
+    console.log('📥 productIds type:', typeof req.body?.productIds);
+    console.log('📥 productIds isArray:', Array.isArray(req.body?.productIds));
+    console.log('📥 productIds length:', Array.isArray(req.body?.productIds) ? req.body.productIds.length : 'N/A');
     
-    const { productIds } = req.body; // Array of product IDs in the new order
-    const staffIdentifier = req.headers['x-staff-identifier'] || req.body.staffIdentifier || 'Unknown';
+    // Also check raw body if available
+    if (req.rawBody) {
+      console.log('📥 Raw body:', req.rawBody);
+    }
+    
+    // Try to get productIds from body - handle different possible formats
+    let productIds = req.body?.productIds;
+    
+    // Fallback: if productIds is not directly in body, check if body itself is the array
+    if (!productIds && Array.isArray(req.body)) {
+      productIds = req.body;
+    }
+    
+    // Fallback: if body is a string, try to parse it
+    if (!productIds && typeof req.body === 'string') {
+      try {
+        const parsed = JSON.parse(req.body);
+        productIds = parsed.productIds || parsed;
+      } catch (e) {
+        console.error('❌ Failed to parse body as JSON:', e);
+      }
+    }
+    
+    const staffIdentifier = req.headers['x-staff-identifier'] || req.body?.staffIdentifier || 'Unknown';
 
     if (!Array.isArray(productIds) || productIds.length === 0) {
       console.error('❌ Invalid productIds:', {
         productIds,
         isArray: Array.isArray(productIds),
         length: productIds?.length,
-        type: typeof productIds
+        type: typeof productIds,
+        body: req.body,
+        bodyType: typeof req.body,
+        bodyKeys: Object.keys(req.body || {})
       });
-      return res.status(400).json({ error: 'productIds must be a non-empty array' });
+      return res.status(400).json({ 
+        error: 'productIds must be a non-empty array',
+        received: {
+          body: req.body,
+          productIds: req.body?.productIds,
+          bodyType: typeof req.body
+        }
+      });
     }
 
     // Check permission
