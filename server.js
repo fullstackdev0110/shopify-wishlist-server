@@ -1859,10 +1859,28 @@ app.put('/api/products/admin/sort-order', async (req, res) => {
       return res.status(500).json({ error: 'Database connection failed' });
     }
 
+    // Debug: Log request body to see what we're receiving
+    console.log('📥 Sort order request received:', {
+      body: req.body,
+      bodyType: typeof req.body,
+      bodyKeys: Object.keys(req.body || {}),
+      productIds: req.body?.productIds,
+      productIdsType: typeof req.body?.productIds,
+      isArray: Array.isArray(req.body?.productIds),
+      productIdsLength: Array.isArray(req.body?.productIds) ? req.body.productIds.length : 'N/A',
+      contentType: req.headers['content-type']
+    });
+    
     const { productIds } = req.body; // Array of product IDs in the new order
     const staffIdentifier = req.headers['x-staff-identifier'] || req.body.staffIdentifier || 'Unknown';
 
     if (!Array.isArray(productIds) || productIds.length === 0) {
+      console.error('❌ Invalid productIds:', {
+        productIds,
+        isArray: Array.isArray(productIds),
+        length: productIds?.length,
+        type: typeof productIds
+      });
       return res.status(400).json({ error: 'productIds must be a non-empty array' });
     }
 
@@ -7557,8 +7575,8 @@ if (require.main === module) {
     // Initialize backup scheduler after server starts
     setTimeout(initializeBackupScheduler, 2000);
   });
-  
 } else {
   // For serverless (Vercel), initialize scheduler after a delay
   setTimeout(initializeBackupScheduler, 3000);
 }
+
