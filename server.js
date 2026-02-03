@@ -1910,28 +1910,77 @@ app.put('/api/products/admin/sort-order', express.json({ limit: '10mb' }), async
     }
     
     // Try to get productIds from body - handle different possible formats
-    let productIds = req.body?.productIds;
+    // In Vercel serverless, body parsing can be tricky, so we try multiple approaches
+    let productIds = null;
     
-    // Fallback: if productIds is not directly in body, check if body itself is the array
-    if (!productIds && Array.isArray(req.body)) {
-      productIds = req.body;
+    // Method 1: Direct access (if express.json() worked)
+    if (req.body && req.body.productIds) {
+      productIds = req.body.productIds;
+      console.log('✅ Got productIds from req.body.productIds, length:', productIds.length);
     }
-    
-    // Fallback: if body is a string, try to parse it
-    if (!productIds && typeof req.body === 'string') {
-      try {
-        const parsed = JSON.parse(req.body);
-        productIds = parsed.productIds || parsed;
-      } catch (e) {
-        console.error('❌ Failed to parse body as JSON:', e);
+    // Method 2: Body is the array itself
+    else if (Array.isArray(req.body)) {
+      productIds = req.body;
+      console.log('✅ Got productIds from req.body (array), length:', productIds.length);
+    }
+    // Method 3: Body is an object but productIds is nested differently
+    else if (req.body && typeof req.body === 'object') {
+      // Try common variations
+      productIds = req.body.productIds || req.body.product_ids || req.body.ids || req.body.data;
+      if (productIds) {
+        console.log('✅ Got productIds from req.body object, length:', productIds.length);
       }
     }
     
-    // Additional check: if body is empty object, the JSON parser might have failed
+    // Method 4: Body is a string (needs parsing)
+    if (!productIds && typeof req.body === 'string') {
+      try {
+        const parsed = JSON.parse(req.body);
+        productIds = parsed.productIds || parsed.product_ids || parsed.ids || parsed.data || parsed;
+        if (Array.isArray(productIds)) {
+          console.log('✅ Got productIds from parsed string body, length:', productIds.length);
+        }
+      } catch (e) {
+        console.error('❌ Failed to parse string body:', e);
+      }
+    }
+    
+    // Method 5: Body is a Buffer (Vercel serverless sometimes sends this)
+    if (!productIds && Buffer.isBuffer(req.body)) {
+      try {
+        const bodyString = req.body.toString('utf8');
+        const parsed = JSON.parse(bodyString);
+        productIds = parsed.productIds || parsed.product_ids || parsed.ids || parsed.data || parsed;
+        if (Array.isArray(productIds)) {
+          console.log('✅ Got productIds from Buffer body, length:', productIds.length);
+        }
+      } catch (e) {
+        console.error('❌ Failed to parse Buffer body:', e);
+      }
+    }
+    
+    // Method 6: Try rawBody if available (some serverless frameworks)
+    if (!productIds && req.rawBody) {
+      try {
+        const parsed = typeof req.rawBody === 'string' ? JSON.parse(req.rawBody) : req.rawBody;
+        productIds = parsed.productIds || parsed.product_ids || parsed.ids || parsed.data || parsed;
+        if (Array.isArray(productIds)) {
+          console.log('✅ Got productIds from rawBody, length:', productIds.length);
+        }
+      } catch (e) {
+        console.error('❌ Failed to parse rawBody:', e);
+      }
+    }
+    
+    // Final check: if body is empty object, log detailed info
     if (!productIds && req.body && typeof req.body === 'object' && Object.keys(req.body).length === 0) {
       console.error('❌ Body is empty object - JSON parsing may have failed');
       console.error('❌ Content-Type header:', req.headers['content-type']);
       console.error('❌ Request method:', req.method);
+      console.error('❌ Body type:', typeof req.body);
+      console.error('❌ Body is Buffer:', Buffer.isBuffer(req.body));
+      console.error('❌ Body keys:', Object.keys(req.body));
+      console.error('❌ Has rawBody:', !!req.rawBody);
     }
     
     const staffIdentifier = req.headers['x-staff-identifier'] || req.body?.staffIdentifier || 'Unknown';
@@ -2057,28 +2106,77 @@ app.post('/api/products/admin/sort-order', express.json({ limit: '10mb' }), asyn
     console.log('📥 productIds length:', Array.isArray(req.body?.productIds) ? req.body.productIds.length : 'N/A');
     
     // Try to get productIds from body - handle different possible formats
-    let productIds = req.body?.productIds;
+    // In Vercel serverless, body parsing can be tricky, so we try multiple approaches
+    let productIds = null;
     
-    // Fallback: if productIds is not directly in body, check if body itself is the array
-    if (!productIds && Array.isArray(req.body)) {
-      productIds = req.body;
+    // Method 1: Direct access (if express.json() worked)
+    if (req.body && req.body.productIds) {
+      productIds = req.body.productIds;
+      console.log('✅ Got productIds from req.body.productIds, length:', productIds.length);
     }
-    
-    // Fallback: if body is a string, try to parse it
-    if (!productIds && typeof req.body === 'string') {
-      try {
-        const parsed = JSON.parse(req.body);
-        productIds = parsed.productIds || parsed;
-      } catch (e) {
-        console.error('❌ Failed to parse body as JSON:', e);
+    // Method 2: Body is the array itself
+    else if (Array.isArray(req.body)) {
+      productIds = req.body;
+      console.log('✅ Got productIds from req.body (array), length:', productIds.length);
+    }
+    // Method 3: Body is an object but productIds is nested differently
+    else if (req.body && typeof req.body === 'object') {
+      // Try common variations
+      productIds = req.body.productIds || req.body.product_ids || req.body.ids || req.body.data;
+      if (productIds) {
+        console.log('✅ Got productIds from req.body object, length:', productIds.length);
       }
     }
     
-    // Additional check: if body is empty object, the JSON parser might have failed
+    // Method 4: Body is a string (needs parsing)
+    if (!productIds && typeof req.body === 'string') {
+      try {
+        const parsed = JSON.parse(req.body);
+        productIds = parsed.productIds || parsed.product_ids || parsed.ids || parsed.data || parsed;
+        if (Array.isArray(productIds)) {
+          console.log('✅ Got productIds from parsed string body, length:', productIds.length);
+        }
+      } catch (e) {
+        console.error('❌ Failed to parse string body:', e);
+      }
+    }
+    
+    // Method 5: Body is a Buffer (Vercel serverless sometimes sends this)
+    if (!productIds && Buffer.isBuffer(req.body)) {
+      try {
+        const bodyString = req.body.toString('utf8');
+        const parsed = JSON.parse(bodyString);
+        productIds = parsed.productIds || parsed.product_ids || parsed.ids || parsed.data || parsed;
+        if (Array.isArray(productIds)) {
+          console.log('✅ Got productIds from Buffer body, length:', productIds.length);
+        }
+      } catch (e) {
+        console.error('❌ Failed to parse Buffer body:', e);
+      }
+    }
+    
+    // Method 6: Try rawBody if available (some serverless frameworks)
+    if (!productIds && req.rawBody) {
+      try {
+        const parsed = typeof req.rawBody === 'string' ? JSON.parse(req.rawBody) : req.rawBody;
+        productIds = parsed.productIds || parsed.product_ids || parsed.ids || parsed.data || parsed;
+        if (Array.isArray(productIds)) {
+          console.log('✅ Got productIds from rawBody, length:', productIds.length);
+        }
+      } catch (e) {
+        console.error('❌ Failed to parse rawBody:', e);
+      }
+    }
+    
+    // Final check: if body is empty object, log detailed info
     if (!productIds && req.body && typeof req.body === 'object' && Object.keys(req.body).length === 0) {
       console.error('❌ Body is empty object - JSON parsing may have failed');
       console.error('❌ Content-Type header:', req.headers['content-type']);
       console.error('❌ Request method:', req.method);
+      console.error('❌ Body type:', typeof req.body);
+      console.error('❌ Body is Buffer:', Buffer.isBuffer(req.body));
+      console.error('❌ Body keys:', Object.keys(req.body));
+      console.error('❌ Has rawBody:', !!req.rawBody);
     }
     
     const staffIdentifier = req.headers['x-staff-identifier'] || req.body?.staffIdentifier || 'Unknown';
