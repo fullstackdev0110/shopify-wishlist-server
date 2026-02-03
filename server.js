@@ -1959,12 +1959,44 @@ app.put('/api/products/admin/sort-order', express.json({ limit: '10mb' }), async
     }
 
     // Update sortOrder for each product based on its position in the array
-    const updatePromises = productIds.map((productId, index) => {
-      return db.collection('trade_in_products').updateOne(
-        { _id: new ObjectId(productId) },
-        { $set: { sortOrder: index + 1 } }
-      );
-    });
+    // IMPORTANT: Also update ALL products in the same group (brand+model+deviceType) to have the same sortOrder
+    // This ensures grouping works correctly - all variants of the same model should have the same sortOrder
+    const updatePromises = [];
+    
+    for (let index = 0; index < productIds.length; index++) {
+      const productId = productIds[index];
+      const newSortOrder = index + 1;
+      
+      // First, get the product to find its brand, model, and deviceType
+      const product = await db.collection('trade_in_products').findOne({ _id: new ObjectId(productId) });
+      
+      if (product) {
+        // Update this product's sortOrder
+        updatePromises.push(
+          db.collection('trade_in_products').updateOne(
+            { _id: new ObjectId(productId) },
+            { $set: { sortOrder: newSortOrder } }
+          )
+        );
+        
+        // Also update ALL other products with the same brand+model+deviceType to have the same sortOrder
+        // This ensures all variants (different storage sizes) of the same model have the same sortOrder
+        // This matches how the admin panel groups products
+        updatePromises.push(
+          db.collection('trade_in_products').updateMany(
+            { 
+              _id: { $ne: new ObjectId(productId) }, // Exclude the current product
+              brand: product.brand,
+              model: product.model,
+              deviceType: product.deviceType || 'phone'
+            },
+            { $set: { sortOrder: newSortOrder } }
+          )
+        );
+      } else {
+        console.warn(`⚠️ Product not found: ${productId}`);
+      }
+    }
 
     await Promise.all(updatePromises);
 
@@ -1978,7 +2010,7 @@ app.put('/api/products/admin/sort-order', express.json({ limit: '10mb' }), async
         field: 'sortOrder',
         old: 'previous order',
         new: `reordered ${productIds.length} products`,
-        description: `Reordered ${productIds.length} products`
+        description: `Reordered ${productIds.length} products (including all variants)`
       }]
     });
 
@@ -2074,12 +2106,44 @@ app.post('/api/products/admin/sort-order', express.json({ limit: '10mb' }), asyn
     }
 
     // Update sortOrder for each product based on its position in the array
-    const updatePromises = productIds.map((productId, index) => {
-      return db.collection('trade_in_products').updateOne(
-        { _id: new ObjectId(productId) },
-        { $set: { sortOrder: index + 1 } }
-      );
-    });
+    // IMPORTANT: Also update ALL products in the same group (brand+model+deviceType) to have the same sortOrder
+    // This ensures grouping works correctly - all variants of the same model should have the same sortOrder
+    const updatePromises = [];
+    
+    for (let index = 0; index < productIds.length; index++) {
+      const productId = productIds[index];
+      const newSortOrder = index + 1;
+      
+      // First, get the product to find its brand, model, and deviceType
+      const product = await db.collection('trade_in_products').findOne({ _id: new ObjectId(productId) });
+      
+      if (product) {
+        // Update this product's sortOrder
+        updatePromises.push(
+          db.collection('trade_in_products').updateOne(
+            { _id: new ObjectId(productId) },
+            { $set: { sortOrder: newSortOrder } }
+          )
+        );
+        
+        // Also update ALL other products with the same brand+model+deviceType to have the same sortOrder
+        // This ensures all variants (different storage sizes) of the same model have the same sortOrder
+        // This matches how the admin panel groups products
+        updatePromises.push(
+          db.collection('trade_in_products').updateMany(
+            { 
+              _id: { $ne: new ObjectId(productId) }, // Exclude the current product
+              brand: product.brand,
+              model: product.model,
+              deviceType: product.deviceType || 'phone'
+            },
+            { $set: { sortOrder: newSortOrder } }
+          )
+        );
+      } else {
+        console.warn(`⚠️ Product not found: ${productId}`);
+      }
+    }
 
     await Promise.all(updatePromises);
 
@@ -2093,7 +2157,7 @@ app.post('/api/products/admin/sort-order', express.json({ limit: '10mb' }), asyn
         field: 'sortOrder',
         old: 'previous order',
         new: `reordered ${productIds.length} products`,
-        description: `Reordered ${productIds.length} products`
+        description: `Reordered ${productIds.length} products (including all variants)`
       }]
     });
 
