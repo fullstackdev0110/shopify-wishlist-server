@@ -27,7 +27,9 @@ app.use(cors({
   optionsSuccessStatus: 200
 }));
 
-app.use(express.json());
+// Parse JSON bodies - increase limit for large arrays
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Your Shopify credentials (from environment variables)
 const SHOPIFY_SHOP = process.env.SHOPIFY_SHOP;
@@ -1895,6 +1897,13 @@ app.put('/api/products/admin/sort-order', async (req, res) => {
       } catch (e) {
         console.error('❌ Failed to parse body as JSON:', e);
       }
+    }
+    
+    // Additional check: if body is empty object, the JSON parser might have failed
+    if (!productIds && req.body && typeof req.body === 'object' && Object.keys(req.body).length === 0) {
+      console.error('❌ Body is empty object - JSON parsing may have failed');
+      console.error('❌ Content-Type header:', req.headers['content-type']);
+      console.error('❌ Request method:', req.method);
     }
     
     const staffIdentifier = req.headers['x-staff-identifier'] || req.body?.staffIdentifier || 'Unknown';
@@ -7614,3 +7623,4 @@ if (require.main === module) {
   // For serverless (Vercel), initialize scheduler after a delay
   setTimeout(initializeBackupScheduler, 3000);
 }
+
