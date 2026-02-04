@@ -1452,12 +1452,17 @@ app.get('/api/products/trade-in', async (req, res) => {
         ? productArray.filter(p => p.tags && p.tags.includes(deviceType.toLowerCase()))
         : productArray;
       
-      console.log(`📊 All products order (deviceType: ${deviceType || 'all'}):`, filteredForLog.map(p => ({
+      console.log(`📊 All products order (deviceType: ${deviceType || 'all'}):`, filteredForLog.map((p, index) => ({
+        index: index + 1,
         title: p.title,
         vendor: p.vendor,
         sortOrder: p.sortOrder !== undefined ? p.sortOrder : 'MISSING',
-        deviceType: p.tags?.[0] || 'unknown'
+        deviceType: p.tags?.[0] || 'unknown',
+        id: p.id
       })));
+      
+      // Also log the actual order being sent
+      console.log(`📋 Backend display order:`, filteredForLog.map((p, index) => `${index + 1}. ${p.title} (sortOrder: ${p.sortOrder !== undefined ? p.sortOrder : 'MISSING'})`).join(', '));
     }
     if (productArray.length > 0) {
       console.log(`📱 Sample transformed product:`, {
