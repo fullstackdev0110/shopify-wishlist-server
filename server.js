@@ -4923,7 +4923,8 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       });
       
       // Send reset email
-      const resetUrl = `${req.headers.origin || 'https://tech-corner-9576.myshopify.com'}/account/reset-password?token=${resetToken}`;
+      // Use /pages/account-reset-password to match the actual page template
+      const resetUrl = `${req.headers.origin || 'https://tech-corner-9576.myshopify.com'}/pages/account-reset-password?token=${resetToken}`;
       
       try {
         await transporter.sendMail({
@@ -4979,15 +4980,33 @@ app.post('/api/auth/reset-password', async (req, res) => {
     }
     
     // Find reset token
+    // Note: expiresAt is stored as ISO string, MongoDB can compare ISO strings directly
+    const now = new Date().toISOString();
     const resetToken = await db.collection('password_reset_tokens').findOne({
       token: token,
       used: false,
-      expiresAt: { $gt: new Date().toISOString() }
+      expiresAt: { $gt: now }
     });
     
     if (!resetToken) {
+      // Log for debugging
+      console.log('Reset token lookup failed:', {
+        token: token ? `${token.substring(0, 10)}...` : 'missing',
+        now: now
+      });
+      
+      // Check if token exists but is expired or used
+      const anyToken = await db.collection('password_reset_tokens').findOne({ token: token });
+      if (anyToken) {
+        console.log('Token found but invalid:', {
+          used: anyToken.used,
+          expiresAt: anyToken.expiresAt,
+          isExpired: anyToken.expiresAt <= now
+        });
+      }
+      
       return res.status(400).json({ 
-        error: 'Invalid or expired reset token' 
+        error: 'Invalid or expired reset token. Please request a new password reset link.' 
       });
     }
     
