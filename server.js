@@ -1905,8 +1905,18 @@ app.post('/api/products/admin', async (req, res) => {
 });
 
 // Custom middleware to parse body manually for sort-order endpoint
-// This bypasses express.json() which might not work correctly in Vercel serverless
+// In Vercel serverless, express.json() might have already consumed the stream
+// So we check if req.body is already parsed first, otherwise parse manually
 const parseBodyManually = (req, res, next) => {
+  // If body is already parsed by express.json(), use it
+  if (req.body && typeof req.body === 'object' && Object.keys(req.body).length > 0) {
+    console.log('✅ Body already parsed by express.json(), productIds length:', req.body?.productIds?.length || 0);
+    req.rawBodyParsed = req.body;
+    next();
+    return;
+  }
+  
+  // Otherwise, parse manually from stream
   if (req.method === 'PUT' || req.method === 'POST') {
     let data = '';
     req.on('data', chunk => {
@@ -1918,9 +1928,10 @@ const parseBodyManually = (req, res, next) => {
         if (data) {
           req.body = JSON.parse(data);
           req.rawBodyParsed = req.body;
-          console.log('✅ Manually parsed body, productIds length:', req.body?.productIds?.length || 0);
+          console.log('✅ Manually parsed body from stream, productIds length:', req.body?.productIds?.length || 0);
         } else {
           req.body = {};
+          console.warn('⚠️ Empty body received');
         }
       } catch (e) {
         console.error('❌ Could not parse body in middleware:', e.message);
