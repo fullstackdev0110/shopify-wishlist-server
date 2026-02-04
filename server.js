@@ -4901,13 +4901,15 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       return res.status(500).json({ error: 'Database connection failed' });
     }
     
+    const normalizedEmail = email.toLowerCase().trim();
     const customer = await db.collection('customers').findOne({ 
-      email: email.toLowerCase().trim() 
+      email: normalizedEmail
     });
     
-    // Don't reveal if email exists or not (security best practice)
-    // Always return success message
+    // Only send reset email if customer exists (registered email)
     if (customer) {
+      console.log('✅ Customer found, generating reset token for:', normalizedEmail);
+      
       // Generate reset token
       const resetToken = require('crypto').randomBytes(32).toString('hex');
       const expiresAt = new Date();
@@ -4928,7 +4930,7 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       const resetUrl = `${baseUrl}/pages/account-reset-password?token=${resetToken}`;
       
       // Log the URL being sent (for debugging - remove token from log for security)
-      console.log('📧 Sending password reset email:', {
+      console.log('📧 Sending password reset email to registered email:', {
         to: customer.email,
         url: `${baseUrl}/pages/account-reset-password?token=***`,
         tokenLength: resetToken.length
@@ -4962,16 +4964,33 @@ This link will expire in 1 hour.
 If you didn't request this, please ignore this email.
           `
         });
+        console.log('✅ Password reset email sent successfully to:', customer.email);
       } catch (emailError) {
-        console.error('Email send error:', emailError);
-        // Still return success to not reveal if email exists
+        console.error('❌ Email send error:', emailError);
+        // Return error if email fails to send
+        return res.status(500).json({ 
+          error: 'Failed to send reset email. Please try again later.' 
+        });
       }
+      
+      // Return success only if email was sent
+      return res.json({
+        success: true,
+        message: 'Password reset link has been sent to your registered email address.'
+      });
+    } else {
+      // Email not registered - don't reveal this for security (prevent email enumeration)
+      // But log it for debugging
+      console.log('⚠️ Password reset requested for unregistered email:', normalizedEmail);
+      console.log('ℹ️ No email sent (email not registered)');
+      
+      // Return generic success message to prevent email enumeration attacks
+      // This is a security best practice - don't reveal if an email is registered or not
+      return res.json({
+        success: true,
+        message: 'If an account exists with this email, a password reset link has been sent.'
+      });
     }
-    
-    res.json({
-      success: true,
-      message: 'If an account exists with this email, a password reset link has been sent.'
-    });
     
   } catch (error) {
     console.error('Forgot password error:', error);
