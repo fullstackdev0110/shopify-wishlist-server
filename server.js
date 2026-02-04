@@ -4924,7 +4924,15 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       
       // Send reset email
       // Use /pages/account-reset-password to match the actual page template
-      const resetUrl = `${req.headers.origin || 'https://tech-corner-9576.myshopify.com'}/pages/account-reset-password?token=${resetToken}`;
+      const baseUrl = req.headers.origin || 'https://tech-corner-9576.myshopify.com';
+      const resetUrl = `${baseUrl}/pages/account-reset-password?token=${resetToken}`;
+      
+      // Log the URL being sent (for debugging - remove token from log for security)
+      console.log('📧 Sending password reset email:', {
+        to: customer.email,
+        url: `${baseUrl}/pages/account-reset-password?token=***`,
+        tokenLength: resetToken.length
+      });
       
       try {
         await transporter.sendMail({
@@ -4935,8 +4943,23 @@ app.post('/api/auth/forgot-password', async (req, res) => {
             <h2>Password Reset Request</h2>
             <p>You requested to reset your password. Click the link below to reset it:</p>
             <p><a href="${resetUrl}" style="background: #10b981; color: white; padding: 12px 24px; text-decoration: none; border-radius: 8px; display: inline-block;">Reset Password</a></p>
+            <p style="margin-top: 20px; padding: 15px; background: #f5f5f5; border-radius: 8px; word-break: break-all;">
+              <strong>Or copy and paste this link into your browser:</strong><br>
+              ${resetUrl}
+            </p>
             <p>This link will expire in 1 hour.</p>
             <p>If you didn't request this, please ignore this email.</p>
+          `,
+          text: `
+Password Reset Request
+
+You requested to reset your password. Click the link below to reset it:
+
+${resetUrl}
+
+This link will expire in 1 hour.
+
+If you didn't request this, please ignore this email.
           `
         });
       } catch (emailError) {
