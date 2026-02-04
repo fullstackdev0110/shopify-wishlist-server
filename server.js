@@ -2387,8 +2387,27 @@ app.post('/api/products/admin/sort-order', parseBodyManually, async (req, res) =
 
     const results = await Promise.all(updatePromises);
     const totalModified = results.reduce((sum, r) => sum + (r.modifiedCount || 0), 0);
-    console.log(`✅ Sort order update complete: ${totalModified} document(s) modified`);
+    console.log(`✅ Sort order update complete (POST): ${totalModified} document(s) modified`);
     console.log(`📋 Update log:`, updateLog);
+    
+    // Verify updates by fetching a few products to confirm sortOrder was saved
+    const verificationResults = [];
+    if (updateLog.length > 0) {
+      for (let i = 0; i < Math.min(3, updateLog.length); i++) {
+        const logEntry = updateLog[i];
+        const verifyProduct = await db.collection('trade_in_products').findOne({ _id: new ObjectId(logEntry.productId) });
+        verificationResults.push({
+          productId: logEntry.productId,
+          brand: logEntry.brand,
+          model: logEntry.model,
+          expectedSortOrder: logEntry.newSortOrder,
+          actualSortOrder: verifyProduct?.sortOrder,
+          match: verifyProduct?.sortOrder === logEntry.newSortOrder
+        });
+      }
+    }
+    
+    console.log(`🔍 Verification results (POST):`, verificationResults);
 
     // Log audit trail
     await logAudit({
@@ -2404,10 +2423,82 @@ app.post('/api/products/admin/sort-order', parseBodyManually, async (req, res) =
       }]
     });
 
-    res.json({ success: true, message: `Updated sort order for ${productIds.length} products`, modified: totalModified });
+    res.json({ 
+      success: true, 
+      message: `Updated sort order for ${productIds.length} products`, 
+      modified: totalModified,
+      verification: verificationResults,
+      updateLog: updateLog.slice(0, 5)
+    });
 
   } catch (error) {
     console.error('Error updating product sort order:', error);
+    res.status(500).json({ error: 'Internal server error', message: error.message });
+  }
+});
+
+// Initialize/Reverse sortOrder for all products (admin utility)
+// This reverses the order so newest models appear first
+app.post('/api/products/admin/initialize-sort-order', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    // Get all products, grouped by brand+model+deviceType
+    const allProducts = await db.collection('trade_in_products').find({}).toArray();
+    
+    // Group by brand+model+deviceType
+    const grouped = {};
+    allProducts.forEach(product => {
+      const key = `${product.brand}_${product.model}_${product.deviceType || 'phone'}`;
+      if (!grouped[key]) {
+        grouped[key] = [];
+      }
+      grouped[key].push(product);
+    });
+    
+    // Sort groups by creation date (newest first)
+    const sortedGroups = Object.values(grouped).sort((a, b) => {
+      const aDate = new Date(a[0].createdAt || a[0]._id.getTimestamp());
+      const bDate = new Date(b[0].createdAt || b[0]._id.getTimestamp());
+      return bDate - aDate; // Newest first
+    });
+    
+    // Assign sortOrder: newest groups get lower numbers (appear first)
+    const updatePromises = [];
+    sortedGroups.forEach((group, index) => {
+      const sortOrder = index + 1;
+      // Update all products in this group to have the same sortOrder
+      group.forEach(product => {
+        updatePromises.push(
+          db.collection('trade_in_products').updateOne(
+            { _id: product._id },
+            { $set: { sortOrder: sortOrder } }
+          )
+        );
+      });
+    });
+    
+    await Promise.all(updatePromises);
+    
+    console.log(`✅ Initialized sortOrder for ${allProducts.length} products in ${sortedGroups.length} groups (newest first)`);
+    
+    res.json({ 
+      success: true, 
+      message: `Initialized sortOrder for ${allProducts.length} products (newest models first)`,
+      groups: sortedGroups.length,
+      products: allProducts.length
+    });
+
+  } catch (error) {
+    console.error('Error initializing sort order:', error);
     res.status(500).json({ error: 'Internal server error', message: error.message });
   }
 });
