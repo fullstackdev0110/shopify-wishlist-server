@@ -1875,9 +1875,39 @@ app.post('/api/products/admin', async (req, res) => {
   }
 });
 
+// Custom middleware to parse body manually for sort-order endpoint
+// This bypasses express.json() which might not work correctly in Vercel serverless
+const parseBodyManually = (req, res, next) => {
+  if (req.method === 'PUT' || req.method === 'POST') {
+    let data = '';
+    req.on('data', chunk => {
+      data += chunk.toString();
+    });
+    req.on('end', () => {
+      try {
+        req.rawBodyString = data;
+        if (data) {
+          req.body = JSON.parse(data);
+          req.rawBodyParsed = req.body;
+          console.log('✅ Manually parsed body, productIds length:', req.body?.productIds?.length || 0);
+        } else {
+          req.body = {};
+        }
+      } catch (e) {
+        console.error('❌ Could not parse body in middleware:', e.message);
+        req.body = {};
+      }
+      next();
+    });
+  } else {
+    next();
+  }
+};
+
 // Update product sort order (admin) - MUST come before /:id route
 // Use both PUT and POST to handle different client configurations
-app.put('/api/products/admin/sort-order', express.json({ limit: '10mb' }), async (req, res) => {
+// Use manual body parsing instead of express.json() to avoid Vercel serverless issues
+app.put('/api/products/admin/sort-order', parseBodyManually, async (req, res) => {
   try {
     const authHeader = req.headers['x-api-key'];
     if (authHeader !== API_SECRET) {
@@ -1890,23 +1920,35 @@ app.put('/api/products/admin/sort-order', express.json({ limit: '10mb' }), async
     }
 
     // Debug: Log request body to see what we're receiving
-    console.log('📥 Sort order request received');
+    console.log('📥 Sort order request received (PUT)');
+    console.log('📥 Request method:', req.method);
     console.log('📥 Request headers:', {
       'content-type': req.headers['content-type'],
+      'content-length': req.headers['content-length'],
       'x-api-key': req.headers['x-api-key'] ? 'present' : 'missing',
       'x-staff-identifier': req.headers['x-staff-identifier']
     });
     console.log('📥 Request body:', req.body);
     console.log('📥 Request body type:', typeof req.body);
-    console.log('📥 Request body keys:', Object.keys(req.body || {}));
+    console.log('📥 Request body is null:', req.body === null);
+    console.log('📥 Request body is undefined:', req.body === undefined);
+    console.log('📥 Request body keys:', req.body ? Object.keys(req.body) : 'N/A');
+    console.log('📥 Request body stringified (first 500 chars):', req.body ? JSON.stringify(req.body).substring(0, 500) : 'N/A');
     console.log('📥 productIds:', req.body?.productIds);
     console.log('📥 productIds type:', typeof req.body?.productIds);
     console.log('📥 productIds isArray:', Array.isArray(req.body?.productIds));
     console.log('📥 productIds length:', Array.isArray(req.body?.productIds) ? req.body.productIds.length : 'N/A');
     
-    // Also check raw body if available
-    if (req.rawBody) {
-      console.log('📥 Raw body:', req.rawBody);
+    // Check raw body sources
+    console.log('📥 Has rawBody:', !!req.rawBody);
+    console.log('📥 Has rawBodyString:', !!req.rawBodyString);
+    console.log('📥 Has rawBodyParsed:', !!req.rawBodyParsed);
+    if (req.rawBodyString) {
+      console.log('📥 rawBodyString (first 500 chars):', req.rawBodyString.substring(0, 500));
+    }
+    if (req.rawBodyParsed) {
+      console.log('📥 rawBodyParsed:', req.rawBodyParsed);
+      console.log('📥 rawBodyParsed.productIds:', req.rawBodyParsed.productIds);
     }
     
     // Try to get productIds from body - handle different possible formats
@@ -1969,6 +2011,19 @@ app.put('/api/products/admin/sort-order', express.json({ limit: '10mb' }), async
         }
       } catch (e) {
         console.error('❌ Failed to parse rawBody:', e);
+      }
+    }
+    
+    // Method 7: Try rawBodyString from our custom middleware
+    if (!productIds && req.rawBodyString) {
+      try {
+        const parsed = req.rawBodyParsed || JSON.parse(req.rawBodyString);
+        productIds = parsed.productIds || parsed.product_ids || parsed.ids || parsed.data || parsed;
+        if (Array.isArray(productIds)) {
+          console.log('✅ Got productIds from rawBodyString (custom middleware), length:', productIds.length);
+        }
+      } catch (e) {
+        console.error('❌ Failed to parse rawBodyString:', e);
       }
     }
     
@@ -2077,7 +2132,8 @@ app.put('/api/products/admin/sort-order', express.json({ limit: '10mb' }), async
 });
 
 // Also support POST for sort-order (fallback for clients that have issues with PUT)
-app.post('/api/products/admin/sort-order', express.json({ limit: '10mb' }), async (req, res) => {
+// Use manual body parsing instead of express.json() to avoid Vercel serverless issues
+app.post('/api/products/admin/sort-order', parseBodyManually, async (req, res) => {
   // Reuse the same handler logic
   try {
     const authHeader = req.headers['x-api-key'];
@@ -2165,6 +2221,19 @@ app.post('/api/products/admin/sort-order', express.json({ limit: '10mb' }), asyn
         }
       } catch (e) {
         console.error('❌ Failed to parse rawBody:', e);
+      }
+    }
+    
+    // Method 7: Try rawBodyString from our custom middleware
+    if (!productIds && req.rawBodyString) {
+      try {
+        const parsed = req.rawBodyParsed || JSON.parse(req.rawBodyString);
+        productIds = parsed.productIds || parsed.product_ids || parsed.ids || parsed.data || parsed;
+        if (Array.isArray(productIds)) {
+          console.log('✅ Got productIds from rawBodyString (custom middleware), length:', productIds.length);
+        }
+      } catch (e) {
+        console.error('❌ Failed to parse rawBodyString:', e);
       }
     }
     
