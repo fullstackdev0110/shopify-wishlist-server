@@ -1508,27 +1508,51 @@ app.get('/api/products/admin', async (req, res) => {
       return res.status(500).json({ error: 'Database connection failed' });
     }
 
-    // Initialize sortOrder for products that don't have it (use sequential numbers)
+    // Initialize sortOrder for products that don't have it
+    // Use reverse chronological order by default (newest models first)
+    // Group by brand+model+deviceType and assign sortOrder based on creation date (newest first)
     const productsWithoutSortOrder = await db.collection('trade_in_products')
       .find({ sortOrder: { $exists: false } })
       .toArray();
     
     if (productsWithoutSortOrder.length > 0) {
-      // Get max sortOrder or use 0 if none exists
+      // Get all existing products with sortOrder to find the max
       const maxSortResult = await db.collection('trade_in_products')
         .find({ sortOrder: { $exists: true } }, { sort: { sortOrder: -1 }, limit: 1 })
         .toArray();
-      let nextSortOrder = maxSortResult.length > 0 ? maxSortResult[0].sortOrder + 1 : 1;
+      const maxSortOrder = maxSortResult.length > 0 ? maxSortResult[0].sortOrder : 0;
       
-      // Update all products without sortOrder
-      for (const product of productsWithoutSortOrder) {
-        await db.collection('trade_in_products').updateOne(
-          { _id: product._id },
-          { $set: { sortOrder: nextSortOrder } }
-        );
+      // Group products by brand+model+deviceType and sort by createdAt (newest first)
+      const grouped = {};
+      productsWithoutSortOrder.forEach(product => {
+        const key = `${product.brand}_${product.model}_${product.deviceType || 'phone'}`;
+        if (!grouped[key]) {
+          grouped[key] = [];
+        }
+        grouped[key].push(product);
+      });
+      
+      // Sort groups by the earliest createdAt in each group (newest groups first)
+      const sortedGroups = Object.values(grouped).sort((a, b) => {
+        const aDate = new Date(a[0].createdAt || a[0]._id.getTimestamp());
+        const bDate = new Date(b[0].createdAt || b[0]._id.getTimestamp());
+        return bDate - aDate; // Newest first
+      });
+      
+      // Assign sortOrder starting from maxSortOrder + 1, but in reverse (newest first)
+      let nextSortOrder = maxSortOrder + 1;
+      for (const group of sortedGroups) {
+        // All products in the same group get the same sortOrder
+        const groupSortOrder = nextSortOrder;
+        for (const product of group) {
+          await db.collection('trade_in_products').updateOne(
+            { _id: product._id },
+            { $set: { sortOrder: groupSortOrder } }
+          );
+        }
         nextSortOrder++;
       }
-      console.log(`✅ Admin: Initialized sortOrder for ${productsWithoutSortOrder.length} products`);
+      console.log(`✅ Admin: Initialized sortOrder for ${productsWithoutSortOrder.length} products (newest first)`);
     }
     
     let products = await db.collection('trade_in_products').find({}).sort({ 
@@ -2076,6 +2100,7 @@ app.put('/api/products/admin/sort-order', parseBodyManually, async (req, res) =>
     // IMPORTANT: Also update ALL products in the same group (brand+model+deviceType) to have the same sortOrder
     // This ensures grouping works correctly - all variants of the same model should have the same sortOrder
     const updatePromises = [];
+    const updateLog = [];
     
     for (let index = 0; index < productIds.length; index++) {
       const productId = productIds[index];
@@ -2085,12 +2110,24 @@ app.put('/api/products/admin/sort-order', parseBodyManually, async (req, res) =>
       const product = await db.collection('trade_in_products').findOne({ _id: new ObjectId(productId) });
       
       if (product) {
+        const oldSortOrder = product.sortOrder;
+        updateLog.push({
+          productId,
+          brand: product.brand,
+          model: product.model,
+          oldSortOrder,
+          newSortOrder
+        });
+        
         // Update this product's sortOrder
         updatePromises.push(
           db.collection('trade_in_products').updateOne(
             { _id: new ObjectId(productId) },
             { $set: { sortOrder: newSortOrder } }
-          )
+          ).then(result => {
+            console.log(`✅ Updated product ${productId} (${product.brand} ${product.model}): sortOrder ${oldSortOrder} → ${newSortOrder}, modified: ${result.modifiedCount}`);
+            return result;
+          })
         );
         
         // Also update ALL other products with the same brand+model+deviceType to have the same sortOrder
@@ -2105,14 +2142,22 @@ app.put('/api/products/admin/sort-order', parseBodyManually, async (req, res) =>
               deviceType: product.deviceType || 'phone'
             },
             { $set: { sortOrder: newSortOrder } }
-          )
+          ).then(result => {
+            if (result.modifiedCount > 0) {
+              console.log(`✅ Updated ${result.modifiedCount} variant(s) of ${product.brand} ${product.model} to sortOrder ${newSortOrder}`);
+            }
+            return result;
+          })
         );
       } else {
         console.warn(`⚠️ Product not found: ${productId}`);
       }
     }
 
-    await Promise.all(updatePromises);
+    const results = await Promise.all(updatePromises);
+    const totalModified = results.reduce((sum, r) => sum + (r.modifiedCount || 0), 0);
+    console.log(`✅ Sort order update complete: ${totalModified} document(s) modified`);
+    console.log(`📋 Update log:`, updateLog);
 
     // Log audit trail
     await logAudit({
@@ -2128,7 +2173,7 @@ app.put('/api/products/admin/sort-order', parseBodyManually, async (req, res) =>
       }]
     });
 
-    res.json({ success: true, message: `Updated sort order for ${productIds.length} products` });
+    res.json({ success: true, message: `Updated sort order for ${productIds.length} products`, modified: totalModified });
 
   } catch (error) {
     console.error('Error updating product sort order:', error);
@@ -2286,6 +2331,7 @@ app.post('/api/products/admin/sort-order', parseBodyManually, async (req, res) =
     // IMPORTANT: Also update ALL products in the same group (brand+model+deviceType) to have the same sortOrder
     // This ensures grouping works correctly - all variants of the same model should have the same sortOrder
     const updatePromises = [];
+    const updateLog = [];
     
     for (let index = 0; index < productIds.length; index++) {
       const productId = productIds[index];
@@ -2295,12 +2341,24 @@ app.post('/api/products/admin/sort-order', parseBodyManually, async (req, res) =
       const product = await db.collection('trade_in_products').findOne({ _id: new ObjectId(productId) });
       
       if (product) {
+        const oldSortOrder = product.sortOrder;
+        updateLog.push({
+          productId,
+          brand: product.brand,
+          model: product.model,
+          oldSortOrder,
+          newSortOrder
+        });
+        
         // Update this product's sortOrder
         updatePromises.push(
           db.collection('trade_in_products').updateOne(
             { _id: new ObjectId(productId) },
             { $set: { sortOrder: newSortOrder } }
-          )
+          ).then(result => {
+            console.log(`✅ Updated product ${productId} (${product.brand} ${product.model}): sortOrder ${oldSortOrder} → ${newSortOrder}, modified: ${result.modifiedCount}`);
+            return result;
+          })
         );
         
         // Also update ALL other products with the same brand+model+deviceType to have the same sortOrder
@@ -2315,14 +2373,22 @@ app.post('/api/products/admin/sort-order', parseBodyManually, async (req, res) =
               deviceType: product.deviceType || 'phone'
             },
             { $set: { sortOrder: newSortOrder } }
-          )
+          ).then(result => {
+            if (result.modifiedCount > 0) {
+              console.log(`✅ Updated ${result.modifiedCount} variant(s) of ${product.brand} ${product.model} to sortOrder ${newSortOrder}`);
+            }
+            return result;
+          })
         );
       } else {
         console.warn(`⚠️ Product not found: ${productId}`);
       }
     }
 
-    await Promise.all(updatePromises);
+    const results = await Promise.all(updatePromises);
+    const totalModified = results.reduce((sum, r) => sum + (r.modifiedCount || 0), 0);
+    console.log(`✅ Sort order update complete: ${totalModified} document(s) modified`);
+    console.log(`📋 Update log:`, updateLog);
 
     // Log audit trail
     await logAudit({
@@ -2338,7 +2404,7 @@ app.post('/api/products/admin/sort-order', parseBodyManually, async (req, res) =
       }]
     });
 
-    res.json({ success: true, message: `Updated sort order for ${productIds.length} products` });
+    res.json({ success: true, message: `Updated sort order for ${productIds.length} products`, modified: totalModified });
 
   } catch (error) {
     console.error('Error updating product sort order:', error);
