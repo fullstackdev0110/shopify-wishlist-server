@@ -139,9 +139,41 @@ async function initMongoDB() {
       // Password reset tokens
       await db.collection('password_reset_tokens').createIndex({ token: 1 }, { unique: true });
       await db.collection('password_reset_tokens').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+      
+      // Price quotes collection
+      await db.collection('price_quotes').createIndex({ quoteId: 1 }, { unique: true });
+      await db.collection('price_quotes').createIndex({ email: 1 });
+      await db.collection('price_quotes').createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+      await db.collection('price_quotes').createIndex({ status: 1 });
+      await db.collection('price_quotes').createIndex({ createdAt: -1 });
+      
+      // Settings collection (for global settings)
+      await db.collection('settings').createIndex({ key: 1 }, { unique: true });
     } catch (indexError) {
       // Indexes might already exist, that's okay
       console.log('Index creation skipped (may already exist)');
+    }
+    
+    // Initialize default settings if they don't exist
+    try {
+      await ensureMongoConnection();
+      if (db) {
+        const defaultSettings = [
+          { key: 'storeCreditMultiplier', value: 1.1, description: 'Store credit multiplier (default: 1.1 = 10% bonus)', updatedAt: new Date().toISOString() },
+          { key: 'quoteExpirationDays', value: 7, description: 'Price quote expiration in days (default: 7)', updatedAt: new Date().toISOString() }
+        ];
+        
+        for (const setting of defaultSettings) {
+          await db.collection('settings').updateOne(
+            { key: setting.key },
+            { $setOnInsert: setting },
+            { upsert: true }
+          );
+        }
+        console.log('✅ Default settings initialized');
+      }
+    } catch (settingsError) {
+      console.warn('⚠️ Could not initialize default settings:', settingsError.message);
     }
     
     return true;
@@ -1084,14 +1116,48 @@ app.post('/api/pricing/calculate', async (req, res) => {
       // Already using condition-specific price, just round
       finalPrice = Math.round(basePrice * 100) / 100;
     }
+    
+    // Get payment method from request (if provided) to calculate store credit price
+    const paymentMethod = req.body.paymentMethod || 'store_credit'; // Default to store_credit for display
+    let storeCreditPrice = finalPrice;
+    let storeCreditMultiplier = 1.0;
+    
+    // Apply store credit multiplier if payment method is store_credit
+    if (paymentMethod === 'store_credit') {
+      try {
+        await ensureMongoConnection();
+        if (db) {
+          // Get global store credit multiplier setting
+          const globalSetting = await db.collection('settings').findOne({ key: 'storeCreditMultiplier' });
+          storeCreditMultiplier = globalSetting ? parseFloat(globalSetting.value) : 1.1; // Default 1.1
+          
+          // Check if product has individual multiplier override
+          if (product && product.storeCreditMultiplier !== undefined && product.storeCreditMultiplier !== null) {
+            storeCreditMultiplier = parseFloat(product.storeCreditMultiplier);
+            console.log(`✅ Using product-specific store credit multiplier: ${storeCreditMultiplier}`);
+          } else {
+            console.log(`✅ Using global store credit multiplier: ${storeCreditMultiplier}`);
+          }
+          
+          storeCreditPrice = Math.round(finalPrice * storeCreditMultiplier * 100) / 100;
+        }
+      } catch (error) {
+        console.warn('⚠️ Could not fetch store credit multiplier, using default:', error.message);
+        storeCreditMultiplier = 1.1; // Fallback to default
+        storeCreditPrice = Math.round(finalPrice * 1.1 * 100) / 100;
+      }
+    }
 
     res.json({
       success: true,
       basePrice,
       conditionMultiplier: multiplier,
       finalPrice,
+      storeCreditMultiplier: paymentMethod === 'store_credit' ? storeCreditMultiplier : null,
+      storeCreditPrice: paymentMethod === 'store_credit' ? storeCreditPrice : null,
       currency: 'GBP',
       formattedPrice: `£${finalPrice.toFixed(2)}`,
+      formattedStoreCreditPrice: paymentMethod === 'store_credit' ? `£${storeCreditPrice.toFixed(2)}` : null,
       // Include system type for debugging
       system: useConditionPrice ? 'database-condition-specific' : (productId && variantId ? 'shopify-variant' : 'legacy')
     });
@@ -1818,6 +1884,7 @@ app.post('/api/products/admin', async (req, res) => {
       imageUrl: imageUrl || null,
       prices: prices || {}, // { Excellent: 500, Good: 400, Fair: 300, Faulty: null }
       slug: slug, // SEO-friendly URL slug
+      storeCreditMultiplier: req.body.storeCreditMultiplier !== undefined && req.body.storeCreditMultiplier !== null && req.body.storeCreditMultiplier !== '' ? parseFloat(req.body.storeCreditMultiplier) : undefined, // Optional per-product override
       updatedAt: new Date().toISOString(),
       lastEditedBy: staffIdentifier
     };
@@ -2587,9 +2654,15 @@ app.put('/api/products/admin/:id', async (req, res) => {
       productData.sortOrder = oldProduct.sortOrder;
     }
     
+    // Handle $unset for removing storeCreditMultiplier if explicitly set to empty
+    const updateQuery = { $set: productData };
+    if (req.body.storeCreditMultiplier === '' || req.body.storeCreditMultiplier === null) {
+      updateQuery.$unset = { storeCreditMultiplier: '' };
+    }
+    
     const result = await db.collection('trade_in_products').updateOne(
       { _id: new ObjectId(id) },
-      { $set: productData }
+      updateQuery
     );
 
     if (result.matchedCount === 0) {
@@ -2686,6 +2759,272 @@ app.delete('/api/products/admin/:id', async (req, res) => {
   } catch (error) {
     console.error('Error deleting product:', error);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ============================================
+// SETTINGS MANAGEMENT
+// ============================================
+
+// Get all settings (admin)
+app.get('/api/settings', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    const settings = await db.collection('settings').find({}).toArray();
+    const settingsObj = {};
+    settings.forEach(setting => {
+      settingsObj[setting.key] = setting.value;
+    });
+
+    res.json({
+      success: true,
+      settings: settingsObj
+    });
+  } catch (error) {
+    console.error('Error fetching settings:', error);
+    res.status(500).json({ error: 'Failed to fetch settings' });
+  }
+});
+
+// Update setting (admin)
+app.put('/api/settings/:key', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    const { key } = req.params;
+    const { value } = req.body;
+    const staffIdentifier = req.headers['x-staff-identifier'] || 'Unknown';
+
+    if (value === undefined || value === null) {
+      return res.status(400).json({ error: 'Value is required' });
+    }
+
+    // Validate store credit multiplier
+    if (key === 'storeCreditMultiplier') {
+      const multiplier = parseFloat(value);
+      if (isNaN(multiplier) || multiplier < 1.0 || multiplier > 2.0) {
+        return res.status(400).json({ error: 'Store credit multiplier must be between 1.0 and 2.0' });
+      }
+    }
+
+    // Validate quote expiration days
+    if (key === 'quoteExpirationDays') {
+      const days = parseInt(value);
+      if (isNaN(days) || days < 1 || days > 365) {
+        return res.status(400).json({ error: 'Quote expiration days must be between 1 and 365' });
+      }
+    }
+
+    await db.collection('settings').updateOne(
+      { key: key },
+      { 
+        $set: { 
+          value: key === 'storeCreditMultiplier' ? parseFloat(value) : (key === 'quoteExpirationDays' ? parseInt(value) : value),
+          updatedAt: new Date().toISOString(),
+          updatedBy: staffIdentifier
+        },
+        $setOnInsert: {
+          key: key,
+          description: key === 'storeCreditMultiplier' ? 'Store credit multiplier (default: 1.1 = 10% bonus)' : 'Quote expiration in days (default: 7)',
+          createdAt: new Date().toISOString()
+        }
+      },
+      { upsert: true }
+    );
+
+    // Log audit trail
+    await logAudit({
+      action: 'update_setting',
+      resourceType: 'setting',
+      resourceId: key,
+      staffIdentifier: staffIdentifier,
+      changes: [{
+        field: key,
+        old: 'previous value',
+        new: value.toString(),
+        description: `Updated ${key} to ${value}`
+      }]
+    });
+
+    res.json({
+      success: true,
+      message: 'Setting updated successfully',
+      key: key,
+      value: key === 'storeCreditMultiplier' ? parseFloat(value) : (key === 'quoteExpirationDays' ? parseInt(value) : value)
+    });
+  } catch (error) {
+    console.error('Error updating setting:', error);
+    res.status(500).json({ error: 'Failed to update setting' });
+  }
+});
+
+// ============================================
+// PRICE QUOTES MANAGEMENT
+// ============================================
+
+// Get all price quotes (admin)
+app.get('/api/quotes', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    const { status, email, page = 1, limit = 50 } = req.query;
+    const query = {};
+    
+    if (status) {
+      query.status = status;
+    }
+    
+    if (email) {
+      query.email = email.toLowerCase().trim();
+    }
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const quotes = await db.collection('price_quotes')
+      .find(query)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(parseInt(limit))
+      .toArray();
+
+    const total = await db.collection('price_quotes').countDocuments(query);
+
+    res.json({
+      success: true,
+      quotes: quotes,
+      total: total,
+      page: parseInt(page),
+      limit: parseInt(limit),
+      totalPages: Math.ceil(total / parseInt(limit))
+    });
+  } catch (error) {
+    console.error('Error fetching quotes:', error);
+    res.status(500).json({ error: 'Failed to fetch quotes' });
+  }
+});
+
+// Get single quote (admin)
+app.get('/api/quotes/:quoteId', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    const { quoteId } = req.params;
+    const quote = await db.collection('price_quotes').findOne({ quoteId: quoteId });
+
+    if (!quote) {
+      return res.status(404).json({ error: 'Quote not found' });
+    }
+
+    res.json({
+      success: true,
+      quote: quote
+    });
+  } catch (error) {
+    console.error('Error fetching quote:', error);
+    res.status(500).json({ error: 'Failed to fetch quote' });
+  }
+});
+
+// ============================================
+// BULK STORE CREDIT MULTIPLIER UPDATE
+// ============================================
+
+// Bulk update store credit multiplier for all products (admin)
+app.post('/api/products/admin/bulk-update-store-credit-multiplier', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    const { multiplier, overrideExisting } = req.body;
+    const staffIdentifier = req.headers['x-staff-identifier'] || 'Unknown';
+
+    // Check permission
+    if (!await hasPermission(staffIdentifier, 'pricingEdit')) {
+      return res.status(403).json({ 
+        error: 'Permission denied. You need "pricingEdit" permission to update store credit multipliers.' 
+      });
+    }
+
+    if (!multiplier || isNaN(parseFloat(multiplier)) || parseFloat(multiplier) < 1.0 || parseFloat(multiplier) > 2.0) {
+      return res.status(400).json({ error: 'Multiplier must be a number between 1.0 and 2.0' });
+    }
+
+    const multiplierValue = parseFloat(multiplier);
+    const shouldOverride = overrideExisting === true;
+
+    let query = {};
+    if (!shouldOverride) {
+      // Only update products that don't have a storeCreditMultiplier set
+      query.storeCreditMultiplier = { $exists: false };
+    }
+
+    const result = await db.collection('trade_in_products').updateMany(
+      query,
+      { $set: { storeCreditMultiplier: multiplierValue } }
+    );
+
+    // Log audit trail
+    await logAudit({
+      action: 'bulk_update_store_credit_multiplier',
+      resourceType: 'products',
+      resourceId: 'all',
+      staffIdentifier: staffIdentifier,
+      changes: [{
+        field: 'storeCreditMultiplier',
+        old: 'various',
+        new: multiplierValue.toString(),
+        description: `Bulk updated store credit multiplier to ${multiplierValue} for ${result.modifiedCount} product(s)`
+      }]
+    });
+
+    res.json({
+      success: true,
+      message: `Store credit multiplier updated for ${result.modifiedCount} product(s)`,
+      modifiedCount: result.modifiedCount,
+      multiplier: multiplierValue
+    });
+  } catch (error) {
+    console.error('Error bulk updating store credit multiplier:', error);
+    res.status(500).json({ error: 'Failed to update store credit multipliers' });
   }
 });
 
@@ -5299,7 +5638,7 @@ app.put('/api/customer/change-password', authenticateToken, async (req, res) => 
 // Email price quote
 app.post('/api/trade-in/email-price', async (req, res) => {
   try {
-    const { to, subject, itemName, brand, model, storage, condition, price, priceFormatted, deviceType, pageUrl } = req.body;
+    const { to, subject, itemName, brand, model, storage, condition, price, priceFormatted, deviceType, pageUrl, productId, variantId } = req.body;
     
     if (!to || !itemName || !price) {
       return res.status(400).json({ error: 'Missing required fields (to, itemName, price)' });
@@ -5310,6 +5649,40 @@ app.post('/api/trade-in/email-price', async (req, res) => {
     if (!emailRegex.test(to)) {
       return res.status(400).json({ error: 'Invalid email address' });
     }
+    
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+    
+    // Get quote expiration days from settings
+    const quoteExpirationSetting = await db.collection('settings').findOne({ key: 'quoteExpirationDays' });
+    const quoteExpirationDays = quoteExpirationSetting ? parseInt(quoteExpirationSetting.value) : 7;
+    
+    // Create price quote record
+    const quoteId = require('crypto').randomBytes(16).toString('hex');
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + quoteExpirationDays);
+    
+    const quote = {
+      quoteId,
+      email: to.toLowerCase().trim(),
+      brand: brand || '',
+      model: model || '',
+      storage: storage || 'Unknown',
+      condition: condition || '',
+      deviceType: deviceType || 'phone',
+      quotedPrice: parseFloat(price),
+      productId: productId || null,
+      variantId: variantId || null,
+      createdAt: new Date().toISOString(),
+      expiresAt: expiresAt.toISOString(),
+      status: 'pending',
+      submissionId: null
+    };
+    
+    await db.collection('price_quotes').insertOne(quote);
+    console.log('✅ Price quote created:', { quoteId, email: to, price, expiresAt: expiresAt.toISOString() });
     
     // Create email content
     const emailSubject = subject || `Trade-in Quote: ${itemName}`;
@@ -5333,7 +5706,7 @@ app.post('/api/trade-in/email-price', async (req, res) => {
           </p>
         </div>
         
-        <p>This quote is valid for 30 days. To proceed with your trade-in, please visit:</p>
+        <p>This quote is valid for ${quoteExpirationDays} days. To proceed with your trade-in, please visit:</p>
         <p><a href="${emailUrl}" style="color: #10b981; text-decoration: underline;">Complete Your Trade-in</a></p>
         
         <p style="margin-top: 2rem; color: #666; font-size: 0.9rem;">
@@ -5353,7 +5726,7 @@ Storage: ${storage}
 
 We'll pay you: ${priceFormatted || '£' + parseFloat(price).toFixed(2)}
 
-This quote is valid for 30 days. To proceed with your trade-in, please visit:
+This quote is valid for ${quoteExpirationDays} days. To proceed with your trade-in, please visit:
 ${pageUrl || 'https://tech-corner-9576.myshopify.com/pages/sell-your-device'}
 
 If you have any questions, please don't hesitate to contact us.
@@ -5370,7 +5743,9 @@ If you have any questions, please don't hesitate to contact us.
     
     res.json({ 
       success: true, 
-      message: 'Price quote email sent successfully' 
+      message: 'Price quote email sent successfully',
+      quoteId: quoteId,
+      expiresAt: expiresAt.toISOString()
     });
     
   } catch (error) {
@@ -5470,6 +5845,67 @@ app.post('/api/trade-in/submit', async (req, res) => {
       console.log('Guest submission (no valid token)');
     }
 
+    // Check for valid price quotes before creating submission
+    await ensureMongoConnection();
+    let usedQuoteIds = [];
+    
+    if (db) {
+      const normalizedEmail = email.toLowerCase().trim();
+      const now = new Date().toISOString();
+      
+      if (isBatchSubmission) {
+        // For batch submissions, check quotes for each item
+        for (let i = 0; i < items.length; i++) {
+          const item = items[i];
+          const quote = await db.collection('price_quotes').findOne({
+            email: normalizedEmail,
+            brand: (item.brand || '').trim(),
+            model: (item.model || '').trim(),
+            storage: (item.storage || 'Unknown').trim(),
+            condition: (item.condition || '').trim(),
+            deviceType: (item.deviceType || 'phone').trim(),
+            status: 'pending',
+            expiresAt: { $gt: now }
+          });
+          
+          if (quote) {
+            // Use quoted price instead of current price
+            console.log(`✅ Found valid quote for item ${i + 1}: Using locked price £${quote.quotedPrice} instead of £${item.price}`);
+            item.price = quote.quotedPrice;
+            usedQuoteIds.push(quote.quoteId);
+          }
+        }
+      } else {
+        // For single item submission, check for quote
+        const quote = await db.collection('price_quotes').findOne({
+          email: normalizedEmail,
+          brand: (brand || '').trim(),
+          model: (model || '').trim(),
+          storage: (storage || 'Unknown').trim(),
+          condition: (condition || '').trim(),
+          deviceType: (deviceType || 'phone').trim(),
+          status: 'pending',
+          expiresAt: { $gt: now }
+        });
+        
+        if (quote) {
+          // Use quoted price instead of provided price
+          console.log(`✅ Found valid quote: Using locked price £${quote.quotedPrice} instead of £${finalPrice}`);
+          finalPrice = quote.quotedPrice;
+          usedQuoteIds.push(quote.quoteId);
+        }
+      }
+      
+      // Mark used quotes as 'used' and link to submission
+      if (usedQuoteIds.length > 0) {
+        await db.collection('price_quotes').updateMany(
+          { quoteId: { $in: usedQuoteIds } },
+          { $set: { status: 'used', usedAt: new Date().toISOString() } }
+        );
+        console.log(`✅ Marked ${usedQuoteIds.length} quote(s) as used`);
+      }
+    }
+    
     // Create submission
     let submission;
     
@@ -5510,6 +5946,7 @@ app.post('/api/trade-in/submit', async (req, res) => {
         items: submissionItems, // Array of items
         itemCount: items.length,
         finalPrice: totalPrice,
+        quoteIds: usedQuoteIds.length > 0 ? usedQuoteIds : null, // Track which quotes were used
         paymentMethod: selectedPaymentMethod,
         paymentDetails: paymentDetails || {},
         confirmations: confirmations || {},
@@ -5541,6 +5978,7 @@ app.post('/api/trade-in/submit', async (req, res) => {
         storage: storage || 'Unknown',
         condition,
         finalPrice: parseFloat(price),
+        quoteIds: usedQuoteIds.length > 0 ? usedQuoteIds : null, // Track which quotes were used
         deviceType: deviceType || 'phone',
         isCustomDevice: isCustomDevice || false,
         paymentMethod: selectedPaymentMethod,
@@ -5565,6 +6003,15 @@ app.post('/api/trade-in/submit', async (req, res) => {
     
     if (db) {
       try {
+        // Link quotes to submission after submission is created
+        if (usedQuoteIds.length > 0) {
+          await db.collection('price_quotes').updateMany(
+            { quoteId: { $in: usedQuoteIds } },
+            { $set: { submissionId: submission.id } }
+          );
+          console.log(`✅ Linked ${usedQuoteIds.length} quote(s) to submission #${submission.id}`);
+        }
+        
         await db.collection('submissions').replaceOne(
           { id: submission.id },
           submission,
