@@ -849,6 +849,7 @@ app.post('/api/pricing/calculate', async (req, res) => {
 
     let basePrice = null;
     let useConditionPrice = false; // Flag to use direct condition price vs multiplier
+    let product = null; // Product from database (used for storeCreditMultiplier lookup)
 
     // NEW SYSTEM: Check if database product or Shopify product
     if (productId && variantId) {
@@ -868,8 +869,6 @@ app.post('/api/pricing/calculate', async (req, res) => {
           // Example: gid://database/Variant/507f1f77bcf86cd799439011_256GB_default
           // Or without prefix: 507f1f77bcf86cd799439011_256GB_default
           console.log('🔍 Parsing database variantId:', variantId);
-          
-          let product = null;
           
           // Try to extract MongoDB ObjectId from variantId
           // Format: gid://database/Variant/{ObjectId}_{storage}_{color}
