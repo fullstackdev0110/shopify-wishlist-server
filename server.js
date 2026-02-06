@@ -1117,35 +1117,34 @@ app.post('/api/pricing/calculate', async (req, res) => {
       finalPrice = Math.round(basePrice * 100) / 100;
     }
     
-    // Get payment method from request (if provided) to calculate store credit price
-    const paymentMethod = req.body.paymentMethod || 'store_credit'; // Default to store_credit for display
+    // Always calculate store credit price (with bonus) regardless of payment method
+    // This allows the frontend to show both prices and switch between them
+    const paymentMethod = req.body.paymentMethod || 'store_credit'; // Used for determining which price to highlight
     let storeCreditPrice = finalPrice;
     let storeCreditMultiplier = 1.0;
     
-    // Apply store credit multiplier if payment method is store_credit
-    if (paymentMethod === 'store_credit') {
-      try {
-        await ensureMongoConnection();
-        if (db) {
-          // Get global store credit multiplier setting
-          const globalSetting = await db.collection('settings').findOne({ key: 'storeCreditMultiplier' });
-          storeCreditMultiplier = globalSetting ? parseFloat(globalSetting.value) : 1.1; // Default 1.1
-          
-          // Check if product has individual multiplier override
-          if (product && product.storeCreditMultiplier !== undefined && product.storeCreditMultiplier !== null) {
-            storeCreditMultiplier = parseFloat(product.storeCreditMultiplier);
-            console.log(`✅ Using product-specific store credit multiplier: ${storeCreditMultiplier}`);
-          } else {
-            console.log(`✅ Using global store credit multiplier: ${storeCreditMultiplier}`);
-          }
-          
-          storeCreditPrice = Math.round(finalPrice * storeCreditMultiplier * 100) / 100;
+    // Always calculate store credit price (with bonus multiplier)
+    try {
+      await ensureMongoConnection();
+      if (db) {
+        // Get global store credit multiplier setting
+        const globalSetting = await db.collection('settings').findOne({ key: 'storeCreditMultiplier' });
+        storeCreditMultiplier = globalSetting ? parseFloat(globalSetting.value) : 1.1; // Default 1.1
+        
+        // Check if product has individual multiplier override
+        if (product && product.storeCreditMultiplier !== undefined && product.storeCreditMultiplier !== null) {
+          storeCreditMultiplier = parseFloat(product.storeCreditMultiplier);
+          console.log(`✅ Using product-specific store credit multiplier: ${storeCreditMultiplier}`);
+        } else {
+          console.log(`✅ Using global store credit multiplier: ${storeCreditMultiplier}`);
         }
-      } catch (error) {
-        console.warn('⚠️ Could not fetch store credit multiplier, using default:', error.message);
-        storeCreditMultiplier = 1.1; // Fallback to default
-        storeCreditPrice = Math.round(finalPrice * 1.1 * 100) / 100;
+        
+        storeCreditPrice = Math.round(finalPrice * storeCreditMultiplier * 100) / 100;
       }
+    } catch (error) {
+      console.warn('⚠️ Could not fetch store credit multiplier, using default:', error.message);
+      storeCreditMultiplier = 1.1; // Fallback to default
+      storeCreditPrice = Math.round(finalPrice * 1.1 * 100) / 100;
     }
 
     res.json({
@@ -1153,11 +1152,11 @@ app.post('/api/pricing/calculate', async (req, res) => {
       basePrice,
       conditionMultiplier: multiplier,
       finalPrice,
-      storeCreditMultiplier: paymentMethod === 'store_credit' ? storeCreditMultiplier : null,
-      storeCreditPrice: paymentMethod === 'store_credit' ? storeCreditPrice : null,
+      storeCreditMultiplier: storeCreditMultiplier, // Always return multiplier
+      storeCreditPrice: storeCreditPrice, // Always return store credit price (with bonus)
       currency: 'GBP',
       formattedPrice: `£${finalPrice.toFixed(2)}`,
-      formattedStoreCreditPrice: paymentMethod === 'store_credit' ? `£${storeCreditPrice.toFixed(2)}` : null,
+      formattedStoreCreditPrice: `£${storeCreditPrice.toFixed(2)}`, // Always return formatted store credit price
       // Include system type for debugging
       system: useConditionPrice ? 'database-condition-specific' : (productId && variantId ? 'shopify-variant' : 'legacy')
     });
