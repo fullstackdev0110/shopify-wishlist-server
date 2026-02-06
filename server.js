@@ -1035,49 +1035,78 @@ app.post('/api/pricing/calculate', async (req, res) => {
     }
     // OLD SYSTEM: Use pricing rules (backward compatibility)
     else if (brand && model && storage) {
-      // Get base price - try exact match first
-      basePrice = pricingRules[brand]?.[model]?.[storage]?.base;
-      
-      // If not found, try case-insensitive match
-      if (!basePrice) {
-        const brandKeys = Object.keys(pricingRules);
-        const matchedBrand = brandKeys.find(b => b.toLowerCase() === brand.toLowerCase());
-        
-        if (matchedBrand) {
-          const modelKeys = Object.keys(pricingRules[matchedBrand] || {});
-          const matchedModel = modelKeys.find(m => m.toLowerCase() === model.toLowerCase());
+      // Try to find product in database first (to get storeCreditMultiplier)
+      try {
+        await ensureMongoConnection();
+        if (db) {
+          // Try to find product by brand/model/storage to get storeCreditMultiplier
+          product = await db.collection('trade_in_products').findOne({
+            brand: brand.trim(),
+            model: model.trim(),
+            storage: storage.trim()
+          });
           
-          if (matchedModel) {
-            const storageKeys = Object.keys(pricingRules[matchedBrand][matchedModel] || {});
-            const matchedStorage = storageKeys.find(s => s.toLowerCase() === storage.toLowerCase());
-            
-            if (matchedStorage) {
-              basePrice = pricingRules[matchedBrand][matchedModel][matchedStorage]?.base;
-              console.log(`Matched with case-insensitive: ${matchedBrand} ${matchedModel} ${matchedStorage}`);
+          if (product) {
+            console.log('✅ Found product in database for legacy system:', product.brand, product.model, product.storage);
+            // If product has condition-specific prices, use them instead of pricing rules
+            const conditionPrice = product.prices?.[condition];
+            if (conditionPrice !== null && conditionPrice !== undefined) {
+              basePrice = conditionPrice;
+              useConditionPrice = true;
+              console.log(`✅ Using condition price from database: £${basePrice} for ${product.brand} ${product.model} ${product.storage} (${condition})`);
             }
           }
         }
+      } catch (error) {
+        console.warn('⚠️ Could not fetch product from database for legacy system:', error.message);
       }
       
+      // If basePrice not set from database, use pricing rules
       if (!basePrice) {
-        console.log('Pricing not found. Available brands:', Object.keys(pricingRules));
-        console.log('Requested:', { brand, model, storage });
+        // Get base price - try exact match first
+        basePrice = pricingRules[brand]?.[model]?.[storage]?.base;
         
-        // Show available models for the brand if brand exists
-        let availableModels = [];
-        const brandKeys = Object.keys(pricingRules);
-        const matchedBrand = brandKeys.find(b => b.toLowerCase() === brand.toLowerCase());
-        if (matchedBrand) {
-          availableModels = Object.keys(pricingRules[matchedBrand] || {});
+        // If not found, try case-insensitive match
+        if (!basePrice) {
+          const brandKeys = Object.keys(pricingRules);
+          const matchedBrand = brandKeys.find(b => b.toLowerCase() === brand.toLowerCase());
+          
+          if (matchedBrand) {
+            const modelKeys = Object.keys(pricingRules[matchedBrand] || {});
+            const matchedModel = modelKeys.find(m => m.toLowerCase() === model.toLowerCase());
+            
+            if (matchedModel) {
+              const storageKeys = Object.keys(pricingRules[matchedBrand][matchedModel] || {});
+              const matchedStorage = storageKeys.find(s => s.toLowerCase() === storage.toLowerCase());
+              
+              if (matchedStorage) {
+                basePrice = pricingRules[matchedBrand][matchedModel][matchedStorage]?.base;
+                console.log(`Matched with case-insensitive: ${matchedBrand} ${matchedModel} ${matchedStorage}`);
+              }
+            }
+          }
         }
         
-        return res.status(404).json({ 
-          success: false,
-          error: 'Pricing not found for this device configuration',
-          requested: { brand, model, storage },
-          availableBrands: Object.keys(pricingRules),
-          availableModels: availableModels.length > 0 ? availableModels : undefined
-        });
+        if (!basePrice) {
+          console.log('Pricing not found. Available brands:', Object.keys(pricingRules));
+          console.log('Requested:', { brand, model, storage });
+          
+          // Show available models for the brand if brand exists
+          let availableModels = [];
+          const brandKeys = Object.keys(pricingRules);
+          const matchedBrand = brandKeys.find(b => b.toLowerCase() === brand.toLowerCase());
+          if (matchedBrand) {
+            availableModels = Object.keys(pricingRules[matchedBrand] || {});
+          }
+          
+          return res.status(404).json({ 
+            success: false,
+            error: 'Pricing not found for this device configuration',
+            requested: { brand, model, storage },
+            availableBrands: Object.keys(pricingRules),
+            availableModels: availableModels.length > 0 ? availableModels : undefined
+          });
+        }
       }
     } else {
       return res.status(400).json({ 
