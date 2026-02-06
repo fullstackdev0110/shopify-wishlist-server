@@ -2623,8 +2623,18 @@ app.put('/api/products/admin/:id', async (req, res) => {
     }
 
     const { id } = req.params;
-    const { brand, model, storage, color, colors, deviceType, imageUrl, prices } = req.body;
+    const { brand, model, storage, color, colors, deviceType, imageUrl, prices, storeCreditMultiplier } = req.body;
     const staffIdentifier = req.headers['x-staff-identifier'] || req.body.staffIdentifier || 'Unknown';
+    
+    // Debug: Log received storeCreditMultiplier
+    console.log(`📥 PUT /api/products/admin/${id} - Received storeCreditMultiplier:`, {
+      value: storeCreditMultiplier,
+      type: typeof storeCreditMultiplier,
+      isUndefined: storeCreditMultiplier === undefined,
+      isNull: storeCreditMultiplier === null,
+      isNumber: typeof storeCreditMultiplier === 'number',
+      isString: typeof storeCreditMultiplier === 'string'
+    });
 
     // Check permission
     if (!await hasPermission(staffIdentifier, 'pricingEdit')) {
@@ -2682,20 +2692,72 @@ app.put('/api/products/admin/:id', async (req, res) => {
       productData.sortOrder = oldProduct.sortOrder;
     }
     
-    // Handle $unset for removing storeCreditMultiplier if explicitly set to empty
+    // Handle storeCreditMultiplier: include it if provided, or unset if explicitly empty/null
     const updateQuery = { $set: productData };
-    if (req.body.storeCreditMultiplier === '' || req.body.storeCreditMultiplier === null) {
-      updateQuery.$unset = { storeCreditMultiplier: '' };
+    
+    // If storeCreditMultiplier is explicitly null or empty string, remove it (use global default)
+    if (storeCreditMultiplier === null || storeCreditMultiplier === '') {
+      if (!updateQuery.$unset) {
+        updateQuery.$unset = {};
+      }
+      updateQuery.$unset.storeCreditMultiplier = '';
+      console.log(`✅ Removing storeCreditMultiplier for product ${id} (will use global default)`);
+    } 
+    // If storeCreditMultiplier is a valid number, set it
+    else if (storeCreditMultiplier !== undefined && storeCreditMultiplier !== null) {
+      // Handle both number and string types
+      const multiplierValue = typeof storeCreditMultiplier === 'number' 
+        ? storeCreditMultiplier 
+        : parseFloat(storeCreditMultiplier);
+      
+      console.log(`🔍 Processing storeCreditMultiplier for product ${id}:`, {
+        original: storeCreditMultiplier,
+        parsed: multiplierValue,
+        isNaN: isNaN(multiplierValue),
+        inRange: multiplierValue >= 1.0 && multiplierValue <= 2.0
+      });
+      
+      if (!isNaN(multiplierValue) && multiplierValue >= 1.0 && multiplierValue <= 2.0) {
+        productData.storeCreditMultiplier = multiplierValue;
+        console.log(`✅ Setting storeCreditMultiplier to ${productData.storeCreditMultiplier} for product ${id}`);
+      } else {
+        console.warn(`⚠️ Invalid storeCreditMultiplier value: ${storeCreditMultiplier} (parsed: ${multiplierValue}) for product ${id}`);
+      }
+    } else {
+      console.log(`ℹ️ storeCreditMultiplier is undefined for product ${id}, preserving existing value`);
     }
+    // If storeCreditMultiplier is undefined, don't include it in the update (preserves existing value)
+    
+    // Debug: Log what we're about to update
+    console.log(`💾 Updating product ${id} with:`, {
+      hasStoreCreditMultiplier: productData.storeCreditMultiplier !== undefined,
+      storeCreditMultiplier: productData.storeCreditMultiplier,
+      hasUnset: !!updateQuery.$unset,
+      unsetFields: updateQuery.$unset ? Object.keys(updateQuery.$unset) : []
+    });
     
     const result = await db.collection('trade_in_products').updateOne(
       { _id: new ObjectId(id) },
       updateQuery
     );
 
+    console.log(`💾 Update result for product ${id}:`, {
+      matched: result.matchedCount,
+      modified: result.modifiedCount
+    });
+
     if (result.matchedCount === 0) {
       return res.status(404).json({ error: 'Product not found' });
     }
+    
+    // Verify the update by fetching the product
+    const updatedProduct = await db.collection('trade_in_products').findOne({ _id: new ObjectId(id) });
+    console.log(`✅ Verified update for product ${id}:`, {
+      brand: updatedProduct.brand,
+      model: updatedProduct.model,
+      storage: updatedProduct.storage,
+      storeCreditMultiplier: updatedProduct.storeCreditMultiplier
+    });
 
     // Log audit trail
     if (result.modifiedCount > 0) {
