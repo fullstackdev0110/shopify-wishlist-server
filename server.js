@@ -2921,17 +2921,37 @@ app.put('/api/settings/:key', async (req, res) => {
       }
     }
 
+    // Determine value type and description
+    let processedValue = value;
+    let description = '';
+    
+    if (key === 'storeCreditMultiplier') {
+      processedValue = parseFloat(value);
+      description = 'Store credit multiplier (default: 1.1 = 10% bonus)';
+    } else if (key === 'quoteExpirationDays') {
+      processedValue = parseInt(value);
+      description = 'Quote expiration in days (default: 7)';
+    } else if (key === 'emailTemplateSubject') {
+      description = 'Email subject template for price quotes';
+    } else if (key === 'emailTemplateHtml') {
+      description = 'HTML email body template for price quotes';
+    } else if (key === 'emailTemplateText') {
+      description = 'Plain text email body template for price quotes';
+    } else {
+      description = `Setting: ${key}`;
+    }
+    
     await db.collection('settings').updateOne(
       { key: key },
       { 
         $set: { 
-          value: key === 'storeCreditMultiplier' ? parseFloat(value) : (key === 'quoteExpirationDays' ? parseInt(value) : value),
+          value: processedValue,
           updatedAt: new Date().toISOString(),
           updatedBy: staffIdentifier
         },
         $setOnInsert: {
           key: key,
-          description: key === 'storeCreditMultiplier' ? 'Store credit multiplier (default: 1.1 = 10% bonus)' : 'Quote expiration in days (default: 7)',
+          description: description,
           createdAt: new Date().toISOString()
         }
       },
@@ -5773,15 +5793,69 @@ app.post('/api/trade-in/email-price', async (req, res) => {
     await db.collection('price_quotes').insertOne(quote);
     console.log('✅ Price quote created:', { quoteId, email: to, price, expiresAt: expiresAt.toISOString() });
     
-    // Create email content
-    const emailSubject = subject || `Trade-in Quote: ${itemName}`;
+    // Get email templates from settings, or use defaults
+    const emailTemplateSubjectSetting = await db.collection('settings').findOne({ key: 'emailTemplateSubject' });
+    const emailTemplateHtmlSetting = await db.collection('settings').findOne({ key: 'emailTemplateHtml' });
+    const emailTemplateTextSetting = await db.collection('settings').findOne({ key: 'emailTemplateText' });
+    
+    // Prepare template variables
     const escapedItemName = itemName.replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const escapedCondition = (condition || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const escapedStorage = (storage || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const escapedBrand = (brand || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const escapedModel = (model || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const priceDisplay = priceFormatted || '£' + parseFloat(price).toFixed(2);
     const emailUrl = pageUrl || 'https://tech-corner-9576.myshopify.com/pages/sell-your-device';
     
-    const emailHtml = `
+    // Template variables object (for HTML, use escaped; for text, use raw)
+    const templateVarsHtml = {
+      itemName: escapedItemName,
+      brand: escapedBrand,
+      model: escapedModel,
+      storage: escapedStorage,
+      condition: escapedCondition,
+      price: parseFloat(price).toFixed(2),
+      priceFormatted: priceDisplay,
+      quoteExpirationDays: quoteExpirationDays.toString(),
+      emailUrl: emailUrl
+    };
+    
+    const templateVarsText = {
+      itemName: itemName,
+      brand: brand || '',
+      model: model || '',
+      storage: storage || '',
+      condition: condition || '',
+      price: parseFloat(price).toFixed(2),
+      priceFormatted: priceFormatted || '£' + parseFloat(price).toFixed(2),
+      quoteExpirationDays: quoteExpirationDays.toString(),
+      emailUrl: emailUrl
+    };
+    
+    // Function to replace template variables
+    function replaceTemplateVars(template, vars) {
+      let result = template;
+      Object.keys(vars).forEach(key => {
+        const regex = new RegExp(`{{${key}}}`, 'g');
+        result = result.replace(regex, vars[key]);
+      });
+      return result;
+    }
+    
+    // Use custom template or default
+    let emailSubject = subject;
+    if (emailTemplateSubjectSetting && emailTemplateSubjectSetting.value) {
+      emailSubject = replaceTemplateVars(emailTemplateSubjectSetting.value, templateVarsText);
+    } else {
+      emailSubject = emailSubject || `Trade-in Quote: ${itemName}`;
+    }
+    
+    let emailHtml;
+    if (emailTemplateHtmlSetting && emailTemplateHtmlSetting.value) {
+      emailHtml = replaceTemplateVars(emailTemplateHtmlSetting.value, templateVarsHtml);
+    } else {
+      // Default HTML template
+      emailHtml = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 2rem;">
         <h2 style="color: #10b981; margin-bottom: 1rem;">Trade-in Quote</h2>
         <p>Thank you for your interest in trading in your device with us!</p>
@@ -5803,8 +5877,14 @@ app.post('/api/trade-in/email-price', async (req, res) => {
         </p>
       </div>
     `;
+    }
     
-    const emailText = `
+    let emailText;
+    if (emailTemplateTextSetting && emailTemplateTextSetting.value) {
+      emailText = replaceTemplateVars(emailTemplateTextSetting.value, templateVarsText);
+    } else {
+      // Default text template
+      emailText = `
 Trade-in Quote
 
 Thank you for your interest in trading in your device with us!
@@ -5820,6 +5900,7 @@ ${pageUrl || 'https://tech-corner-9576.myshopify.com/pages/sell-your-device'}
 
 If you have any questions, please don't hesitate to contact us.
     `;
+    }
     
     // Send email
     await transporter.sendMail({
