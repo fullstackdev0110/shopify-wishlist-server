@@ -149,6 +149,12 @@ async function initMongoDB() {
       
       // Settings collection (for global settings)
       await db.collection('settings').createIndex({ key: 1 }, { unique: true });
+      
+      // Trade-in products collection indexes for performance
+      await db.collection('trade_in_products').createIndex({ deviceType: 1, sortOrder: 1, brand: 1 });
+      await db.collection('trade_in_products').createIndex({ deviceType: 1, brand: 1, model: 1 });
+      await db.collection('trade_in_products').createIndex({ slug: 1 });
+      console.log('✅ Database indexes created for trade_in_products');
     } catch (indexError) {
       // Indexes might already exist, that's okay
       console.log('Index creation skipped (may already exist)');
@@ -1378,6 +1384,85 @@ function getDefaultImageUrl(deviceType) {
   return defaultImages[normalizedType] || defaultImages.phone;
 }
 
+// Server-side cache for products and brands (5 minutes)
+const productsCache = new Map();
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+// Lightweight endpoint for brands only (much faster)
+app.get('/api/products/brands', async (req, res) => {
+  try {
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({
+        success: false,
+        error: 'Database connection failed'
+      });
+    }
+
+    const { deviceType } = req.query;
+    const cacheKey = 'brands_' + (deviceType || 'all');
+    
+    // Check cache
+    const cached = productsCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+      return res.json({
+        success: true,
+        brands: cached.data,
+        cached: true
+      });
+    }
+
+    // Build query
+    const query = {};
+    if (deviceType && deviceType.trim() !== '') {
+      query.deviceType = deviceType.toLowerCase();
+    }
+
+    // Use MongoDB aggregation to get unique brands with sortOrder (much faster)
+    const brands = await db.collection('trade_in_products').aggregate([
+      { $match: query },
+      { $group: {
+          _id: '$brand',
+          sortOrder: { $min: '$sortOrder' },
+          count: { $sum: 1 }
+        }
+      },
+      { $sort: { sortOrder: 1, _id: 1 } },
+      { $project: {
+          brand: '$_id',
+          sortOrder: 1,
+          count: 1,
+          _id: 0
+        }
+      }
+    ]).toArray();
+
+    const brandList = brands.map(b => ({
+      name: b.brand,
+      sortOrder: b.sortOrder || 999999,
+      count: b.count
+    }));
+
+    // Cache the result
+    productsCache.set(cacheKey, {
+      data: brandList,
+      timestamp: Date.now()
+    });
+
+    res.json({
+      success: true,
+      brands: brandList,
+      cached: false
+    });
+  } catch (error) {
+    console.error('Error fetching brands:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch brands'
+    });
+  }
+});
+
 // Get trade-in products from MongoDB (replaces Shopify API)
 app.get('/api/products/trade-in', async (req, res) => {
   try {
@@ -1390,6 +1475,17 @@ app.get('/api/products/trade-in', async (req, res) => {
     }
 
     const { deviceType } = req.query;
+    const cacheKey = 'products_' + (deviceType || 'all');
+    
+    // Check cache
+    const cached = productsCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+      return res.json({
+        success: true,
+        products: cached.data,
+        cached: true
+      });
+    }
 
     // Build query
     const query = {};
@@ -1397,51 +1493,65 @@ app.get('/api/products/trade-in', async (req, res) => {
       query.deviceType = deviceType.toLowerCase();
     }
 
+    // Use projection to fetch only needed fields (much faster)
+    const projection = {
+      _id: 1,
+      brand: 1,
+      model: 1,
+      storage: 1,
+      deviceType: 1,
+      imageUrl: 1,
+      slug: 1,
+      sortOrder: 1,
+      color: 1,
+      prices: 1
+    };
+
     // Fetch products from MongoDB, sorted by sortOrder first, then brand/model/storage
-    let products = await db.collection('trade_in_products').find(query).sort({ 
-      sortOrder: 1, 
-      brand: 1, 
-      model: 1, 
-      storage: 1 
-    }).toArray();
+    let products = await db.collection('trade_in_products')
+      .find(query, { projection })
+      .sort({ 
+        sortOrder: 1, 
+        brand: 1, 
+        model: 1, 
+        storage: 1 
+      })
+      .toArray();
     
-    // Auto-generate slugs for products that don't have one
-    const updatePromises = [];
-    for (const product of products) {
-      if (!product.slug || product.slug === '') {
-        const slug = generateProductSlug(product.brand, product.model, product.storage, product.color);
-        // Check for duplicates
-        const existing = products.find(p => p.slug === slug && p._id.toString() !== product._id.toString());
-        const finalSlug = existing ? slug + '-' + product._id.toString().substring(0, 8) : slug;
+    // Auto-generate slugs for products that don't have one (do in background, don't wait)
+    const productsNeedingSlugs = products.filter(p => !p.slug || p.slug === '');
+    if (productsNeedingSlugs.length > 0) {
+      // Set temporary slugs for immediate response
+      productsNeedingSlugs.forEach(product => {
+        if (!product.slug) {
+          product.slug = generateProductSlug(product.brand, product.model, product.storage, product.color);
+        }
+      });
+      
+      // Update slugs in background (don't block response)
+      (async () => {
+        const updatePromises = [];
+        for (const product of productsNeedingSlugs) {
+          const slug = generateProductSlug(product.brand, product.model, product.storage, product.color);
+          const existing = products.find(p => p.slug === slug && p._id.toString() !== product._id.toString());
+          const finalSlug = existing ? slug + '-' + product._id.toString().substring(0, 8) : slug;
+          
+          updatePromises.push(
+            db.collection('trade_in_products').updateOne(
+              { _id: product._id },
+              { $set: { slug: finalSlug } }
+            )
+          );
+        }
         
-        updatePromises.push(
-          db.collection('trade_in_products').updateOne(
-            { _id: product._id },
-            { $set: { slug: finalSlug } }
-          )
-        );
-        product.slug = finalSlug; // Update in memory for immediate use
-      }
-    }
-    
-    // Update all products with missing slugs in parallel
-    if (updatePromises.length > 0) {
-      await Promise.all(updatePromises);
-      console.log(`✅ Auto-generated ${updatePromises.length} slugs for products`);
+        if (updatePromises.length > 0) {
+          await Promise.all(updatePromises);
+          console.log(`✅ Auto-generated ${updatePromises.length} slugs for products (background)`);
+        }
+      })();
     }
     
     console.log(`📦 Fetched ${products.length} products from MongoDB for deviceType: ${deviceType || 'all'}`);
-    if (products.length > 0) {
-      console.log(`✅ Sample product:`, {
-        brand: products[0].brand,
-        model: products[0].model,
-        storage: products[0].storage,
-        deviceType: products[0].deviceType,
-        hasImage: !!products[0].imageUrl,
-        hasPrices: !!products[0].prices,
-        hasSlug: !!products[0].slug
-      });
-    }
 
     // Transform to match frontend expected format
     const transformedProducts = products.reduce((acc, product) => {
@@ -1571,11 +1681,26 @@ app.get('/api/products/trade-in', async (req, res) => {
     const productsWithImages = productArray.filter(p => p.featuredImage).length;
     console.log(`🖼️ Products with images: ${productsWithImages}/${productArray.length}`);
 
+    // Cache the result
+    productsCache.set(cacheKey, {
+      data: productArray,
+      timestamp: Date.now()
+    });
+    
+    // Clean old cache entries (keep only last 10)
+    if (productsCache.size > 10) {
+      const entries = Array.from(productsCache.entries());
+      entries.sort((a, b) => b[1].timestamp - a[1].timestamp);
+      productsCache.clear();
+      entries.slice(0, 10).forEach(([key, value]) => productsCache.set(key, value));
+    }
+
     res.json({
       success: true,
       products: productArray,
       count: productArray.length,
-      deviceType: deviceType || 'all'
+      deviceType: deviceType || 'all',
+      cached: false
     });
 
   } catch (error) {
