@@ -3074,6 +3074,13 @@ app.get('/api/settings/public', async (req, res) => {
     const shippingSetting = await db.collection('settings').findOne({ key: 'shippingInstructions' });
     const shippingInstructions = shippingSetting?.value || '';
 
+    // Log for debugging
+    console.log('📦 Fetching shipping instructions:', {
+      found: !!shippingSetting,
+      valueLength: shippingInstructions ? shippingInstructions.length : 0,
+      preview: shippingInstructions ? shippingInstructions.substring(0, 100) + '...' : 'empty'
+    });
+
     res.json({
       success: true,
       shippingInstructions: shippingInstructions
@@ -3139,6 +3146,8 @@ app.put('/api/settings/:key', async (req, res) => {
       description = 'Plain text email body template for price quotes';
     } else if (key === 'shippingInstructions') {
       description = 'Shipping/postal instructions for customers (shown on account page and in emails)';
+      // Keep as string for HTML content
+      processedValue = value;
     } else {
       description = `Setting: ${key}`;
     }
@@ -3159,6 +3168,15 @@ app.put('/api/settings/:key', async (req, res) => {
       },
       { upsert: true }
     );
+    
+    // Log for debugging
+    if (key === 'shippingInstructions') {
+      console.log('✅ Shipping instructions saved:', {
+        key: key,
+        valueLength: processedValue ? processedValue.length : 0,
+        preview: processedValue ? processedValue.substring(0, 100) + '...' : 'empty'
+      });
+    }
 
     // Log audit trail
     await logAudit({
