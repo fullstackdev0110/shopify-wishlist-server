@@ -165,7 +165,7 @@ async function initMongoDB() {
       await ensureMongoConnection();
       if (db) {
         const defaultSettings = [
-          { key: 'storeCreditMultiplier', value: 1.1, description: 'Store credit multiplier (default: 1.1 = 10% bonus)', updatedAt: new Date().toISOString() },
+          { key: 'storeCreditMultiplier', value: 15, description: 'Store credit bonus (default: £15 fixed amount added to price)', updatedAt: new Date().toISOString() },
           { key: 'quoteExpirationDays', value: 7, description: 'Price quote expiration in days (default: 7)', updatedAt: new Date().toISOString() }
         ];
         
@@ -1155,30 +1155,31 @@ app.post('/api/pricing/calculate', async (req, res) => {
     // This allows the frontend to show both prices and switch between them
     const paymentMethod = req.body.paymentMethod || 'store_credit'; // Used for determining which price to highlight
     let storeCreditPrice = finalPrice;
-    let storeCreditMultiplier = 1.0;
+    let storeCreditBonus = 0;
     
-    // Always calculate store credit price (with bonus multiplier)
+    // Always calculate store credit price (with fixed bonus amount)
     try {
       await ensureMongoConnection();
       if (db) {
-        // Get global store credit multiplier setting
+        // Get global store credit bonus setting (fixed amount in GBP)
         const globalSetting = await db.collection('settings').findOne({ key: 'storeCreditMultiplier' });
-        storeCreditMultiplier = globalSetting ? parseFloat(globalSetting.value) : 1.1; // Default 1.1
+        storeCreditBonus = globalSetting ? parseFloat(globalSetting.value) : 15; // Default £15
         
-        // Check if product has individual multiplier override
+        // Check if product has individual bonus override
         if (product && product.storeCreditMultiplier !== undefined && product.storeCreditMultiplier !== null) {
-          storeCreditMultiplier = parseFloat(product.storeCreditMultiplier);
-          console.log(`✅ Using product-specific store credit multiplier: ${storeCreditMultiplier}`);
+          storeCreditBonus = parseFloat(product.storeCreditMultiplier);
+          console.log(`✅ Using product-specific store credit bonus: £${storeCreditBonus}`);
         } else {
-          console.log(`✅ Using global store credit multiplier: ${storeCreditMultiplier}`);
+          console.log(`✅ Using global store credit bonus: £${storeCreditBonus}`);
         }
         
-        storeCreditPrice = Math.round(finalPrice * storeCreditMultiplier * 100) / 100;
+        // Add fixed bonus amount to final price
+        storeCreditPrice = Math.round((finalPrice + storeCreditBonus) * 100) / 100;
       }
     } catch (error) {
-      console.warn('⚠️ Could not fetch store credit multiplier, using default:', error.message);
-      storeCreditMultiplier = 1.1; // Fallback to default
-      storeCreditPrice = Math.round(finalPrice * 1.1 * 100) / 100;
+      console.warn('⚠️ Could not fetch store credit bonus, using default:', error.message);
+      storeCreditBonus = 15; // Fallback to default £15
+      storeCreditPrice = Math.round((finalPrice + 15) * 100) / 100;
     }
 
     res.json({
@@ -1186,7 +1187,7 @@ app.post('/api/pricing/calculate', async (req, res) => {
       basePrice,
       conditionMultiplier: multiplier,
       finalPrice,
-      storeCreditMultiplier: storeCreditMultiplier, // Always return multiplier
+      storeCreditBonus: storeCreditBonus, // Always return bonus amount (fixed value in GBP)
       storeCreditPrice: storeCreditPrice, // Always return store credit price (with bonus)
       currency: 'GBP',
       formattedPrice: `£${finalPrice.toFixed(2)}`,
@@ -2879,18 +2880,18 @@ app.put('/api/products/admin/:id', async (req, res) => {
         ? storeCreditMultiplier 
         : parseFloat(storeCreditMultiplier);
       
-      console.log(`🔍 Processing storeCreditMultiplier for product ${id}:`, {
+      console.log(`🔍 Processing storeCreditMultiplier (bonus) for product ${id}:`, {
         original: storeCreditMultiplier,
         parsed: multiplierValue,
         isNaN: isNaN(multiplierValue),
-        inRange: multiplierValue >= 1.0 && multiplierValue <= 2.0
+        inRange: multiplierValue >= 0 && multiplierValue <= 1000
       });
       
-      if (!isNaN(multiplierValue) && multiplierValue >= 1.0 && multiplierValue <= 2.0) {
+      if (!isNaN(multiplierValue) && multiplierValue >= 0 && multiplierValue <= 1000) {
         productData.storeCreditMultiplier = multiplierValue;
-        console.log(`✅ Setting storeCreditMultiplier to ${productData.storeCreditMultiplier} for product ${id}`);
+        console.log(`✅ Setting storeCreditMultiplier (bonus) to £${productData.storeCreditMultiplier} for product ${id}`);
       } else {
-        console.warn(`⚠️ Invalid storeCreditMultiplier value: ${storeCreditMultiplier} (parsed: ${multiplierValue}) for product ${id}`);
+        console.warn(`⚠️ Invalid storeCreditMultiplier (bonus) value: ${storeCreditMultiplier} (parsed: ${multiplierValue}) for product ${id}`);
       }
     } else {
       console.log(`ℹ️ storeCreditMultiplier is undefined for product ${id}, preserving existing value`);
@@ -3097,7 +3098,7 @@ app.put('/api/settings/:key', async (req, res) => {
     
     if (key === 'storeCreditMultiplier') {
       processedValue = parseFloat(value);
-      description = 'Store credit multiplier (default: 1.1 = 10% bonus)';
+      description = 'Store credit bonus (default: £15 fixed amount added to price)';
     } else if (key === 'quoteExpirationDays') {
       processedValue = parseInt(value);
       description = 'Quote expiration in days (default: 7)';
@@ -3263,8 +3264,8 @@ app.post('/api/products/admin/bulk-update-store-credit-multiplier', async (req, 
       });
     }
 
-    if (!multiplier || isNaN(parseFloat(multiplier)) || parseFloat(multiplier) < 1.0 || parseFloat(multiplier) > 2.0) {
-      return res.status(400).json({ error: 'Multiplier must be a number between 1.0 and 2.0' });
+    if (!multiplier || isNaN(parseFloat(multiplier)) || parseFloat(multiplier) < 0 || parseFloat(multiplier) > 1000) {
+      return res.status(400).json({ error: 'Bonus amount must be a number between 0 and 1000 (GBP)' });
     }
 
     const multiplierValue = parseFloat(multiplier);
@@ -3291,13 +3292,13 @@ app.post('/api/products/admin/bulk-update-store-credit-multiplier', async (req, 
         field: 'storeCreditMultiplier',
         old: 'various',
         new: multiplierValue.toString(),
-        description: `Bulk updated store credit multiplier to ${multiplierValue} for ${result.modifiedCount} product(s)`
+        description: `Bulk updated store credit bonus to £${multiplierValue} for ${result.modifiedCount} product(s)`
       }]
     });
 
     res.json({
       success: true,
-      message: `Store credit multiplier updated for ${result.modifiedCount} product(s)`,
+      message: `Store credit bonus updated to £${multiplierValue} for ${result.modifiedCount} product(s)`,
       modifiedCount: result.modifiedCount,
       multiplier: multiplierValue
     });
