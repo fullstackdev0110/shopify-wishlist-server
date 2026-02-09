@@ -3044,6 +3044,14 @@ app.get('/api/settings', async (req, res) => {
     settings.forEach(setting => {
       settingsObj[setting.key] = setting.value;
     });
+    
+    // Set default values if they don't exist
+    if (settingsObj.storeCreditMultiplier === undefined) {
+      settingsObj.storeCreditMultiplier = 15; // Default £15 bonus
+    }
+    if (settingsObj.quoteExpirationDays === undefined) {
+      settingsObj.quoteExpirationDays = 7; // Default 7 days
+    }
 
     res.json({
       success: true,
@@ -3076,11 +3084,11 @@ app.put('/api/settings/:key', async (req, res) => {
       return res.status(400).json({ error: 'Value is required' });
     }
 
-    // Validate store credit multiplier
+    // Validate store credit bonus (fixed amount in GBP)
     if (key === 'storeCreditMultiplier') {
-      const multiplier = parseFloat(value);
-      if (isNaN(multiplier) || multiplier < 1.0 || multiplier > 2.0) {
-        return res.status(400).json({ error: 'Store credit multiplier must be between 1.0 and 2.0' });
+      const bonus = parseFloat(value);
+      if (isNaN(bonus) || bonus < 0 || bonus > 1000) {
+        return res.status(400).json({ error: 'Store credit bonus must be between 0 and 1000 (GBP)' });
       }
     }
 
