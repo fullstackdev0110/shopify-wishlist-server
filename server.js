@@ -1068,49 +1068,49 @@ app.post('/api/pricing/calculate', async (req, res) => {
       
       // If basePrice not set from database, use pricing rules
       if (!basePrice) {
-        // Get base price - try exact match first
-        basePrice = pricingRules[brand]?.[model]?.[storage]?.base;
+      // Get base price - try exact match first
+      basePrice = pricingRules[brand]?.[model]?.[storage]?.base;
+      
+      // If not found, try case-insensitive match
+      if (!basePrice) {
+        const brandKeys = Object.keys(pricingRules);
+        const matchedBrand = brandKeys.find(b => b.toLowerCase() === brand.toLowerCase());
         
-        // If not found, try case-insensitive match
-        if (!basePrice) {
-          const brandKeys = Object.keys(pricingRules);
-          const matchedBrand = brandKeys.find(b => b.toLowerCase() === brand.toLowerCase());
+        if (matchedBrand) {
+          const modelKeys = Object.keys(pricingRules[matchedBrand] || {});
+          const matchedModel = modelKeys.find(m => m.toLowerCase() === model.toLowerCase());
           
-          if (matchedBrand) {
-            const modelKeys = Object.keys(pricingRules[matchedBrand] || {});
-            const matchedModel = modelKeys.find(m => m.toLowerCase() === model.toLowerCase());
+          if (matchedModel) {
+            const storageKeys = Object.keys(pricingRules[matchedBrand][matchedModel] || {});
+            const matchedStorage = storageKeys.find(s => s.toLowerCase() === storage.toLowerCase());
             
-            if (matchedModel) {
-              const storageKeys = Object.keys(pricingRules[matchedBrand][matchedModel] || {});
-              const matchedStorage = storageKeys.find(s => s.toLowerCase() === storage.toLowerCase());
-              
-              if (matchedStorage) {
-                basePrice = pricingRules[matchedBrand][matchedModel][matchedStorage]?.base;
-                console.log(`Matched with case-insensitive: ${matchedBrand} ${matchedModel} ${matchedStorage}`);
-              }
+            if (matchedStorage) {
+              basePrice = pricingRules[matchedBrand][matchedModel][matchedStorage]?.base;
+              console.log(`Matched with case-insensitive: ${matchedBrand} ${matchedModel} ${matchedStorage}`);
             }
           }
         }
+      }
+      
+      if (!basePrice) {
+        console.log('Pricing not found. Available brands:', Object.keys(pricingRules));
+        console.log('Requested:', { brand, model, storage });
         
-        if (!basePrice) {
-          console.log('Pricing not found. Available brands:', Object.keys(pricingRules));
-          console.log('Requested:', { brand, model, storage });
-          
-          // Show available models for the brand if brand exists
-          let availableModels = [];
-          const brandKeys = Object.keys(pricingRules);
-          const matchedBrand = brandKeys.find(b => b.toLowerCase() === brand.toLowerCase());
-          if (matchedBrand) {
-            availableModels = Object.keys(pricingRules[matchedBrand] || {});
-          }
-          
-          return res.status(404).json({ 
-            success: false,
-            error: 'Pricing not found for this device configuration',
-            requested: { brand, model, storage },
-            availableBrands: Object.keys(pricingRules),
-            availableModels: availableModels.length > 0 ? availableModels : undefined
-          });
+        // Show available models for the brand if brand exists
+        let availableModels = [];
+        const brandKeys = Object.keys(pricingRules);
+        const matchedBrand = brandKeys.find(b => b.toLowerCase() === brand.toLowerCase());
+        if (matchedBrand) {
+          availableModels = Object.keys(pricingRules[matchedBrand] || {});
+        }
+        
+        return res.status(404).json({ 
+          success: false,
+          error: 'Pricing not found for this device configuration',
+          requested: { brand, model, storage },
+          availableBrands: Object.keys(pricingRules),
+          availableModels: availableModels.length > 0 ? availableModels : undefined
+        });
         }
       }
     } else {
@@ -1532,22 +1532,22 @@ app.get('/api/products/trade-in', async (req, res) => {
       
       // Update slugs in background (don't block response)
       (async () => {
-        const updatePromises = [];
+    const updatePromises = [];
         for (const product of productsNeedingSlugs) {
-          const slug = generateProductSlug(product.brand, product.model, product.storage, product.color);
-          const existing = products.find(p => p.slug === slug && p._id.toString() !== product._id.toString());
-          const finalSlug = existing ? slug + '-' + product._id.toString().substring(0, 8) : slug;
-          
-          updatePromises.push(
-            db.collection('trade_in_products').updateOne(
-              { _id: product._id },
-              { $set: { slug: finalSlug } }
-            )
-          );
-        }
+        const slug = generateProductSlug(product.brand, product.model, product.storage, product.color);
+        const existing = products.find(p => p.slug === slug && p._id.toString() !== product._id.toString());
+        const finalSlug = existing ? slug + '-' + product._id.toString().substring(0, 8) : slug;
         
-        if (updatePromises.length > 0) {
-          await Promise.all(updatePromises);
+        updatePromises.push(
+          db.collection('trade_in_products').updateOne(
+            { _id: product._id },
+            { $set: { slug: finalSlug } }
+          )
+        );
+    }
+    
+    if (updatePromises.length > 0) {
+      await Promise.all(updatePromises);
           console.log(`✅ Auto-generated ${updatePromises.length} slugs for products (background)`);
         }
       })();
@@ -1658,27 +1658,27 @@ app.get('/api/products/trade-in', async (req, res) => {
         }
       } else {
         // Create new variant for this storage
-        const variantGid = `gid://database/Variant/${product._id}_${product.storage}_${firstColor}`;
-        const variant = {
-          id: variantGid, // Use full gid format for id as well
-          gid: variantGid,
-          title: product.storage,
-          price: product.prices?.Excellent || product.basePrice || 0, // Use Excellent as base or fallback
-          availableForSale: true,
-          image: {
-            url: product.imageUrl || getDefaultImageUrl(product.deviceType),
-            altText: `${product.brand} ${product.model} ${product.storage}`
-          },
-          options: {
-            storage: product.storage,
+      const variantGid = `gid://database/Variant/${product._id}_${product.storage}_${firstColor}`;
+      const variant = {
+        id: variantGid, // Use full gid format for id as well
+        gid: variantGid,
+        title: product.storage,
+        price: product.prices?.Excellent || product.basePrice || 0, // Use Excellent as base or fallback
+        availableForSale: true,
+        image: {
+          url: product.imageUrl || getDefaultImageUrl(product.deviceType),
+          altText: `${product.brand} ${product.model} ${product.storage}`
+        },
+        options: {
+          storage: product.storage,
             colors: productColors.length > 0 ? productColors.filter(c => c && c !== 'Default' && c !== 'default' && c.trim() !== '') : ['Default'], // Store all colors as array, filter out Default
-            color: firstColor // Keep for backward compatibility
-          },
-          // Store full product data for pricing calculation
-          _productData: product
-        };
+          color: firstColor // Keep for backward compatibility
+        },
+        // Store full product data for pricing calculation
+        _productData: product
+      };
 
-        acc[key].variants.push(variant);
+      acc[key].variants.push(variant);
       }
 
       return acc;
@@ -2905,7 +2905,7 @@ app.put('/api/products/admin/:id', async (req, res) => {
       hasUnset: !!updateQuery.$unset,
       unsetFields: updateQuery.$unset ? Object.keys(updateQuery.$unset) : []
     });
-    
+
     const result = await db.collection('trade_in_products').updateOne(
       { _id: new ObjectId(id) },
       updateQuery
@@ -3063,6 +3063,27 @@ app.get('/api/settings', async (req, res) => {
   }
 });
 
+// Get public settings (no auth required - for customer-facing pages)
+app.get('/api/settings/public', async (req, res) => {
+  try {
+    await ensureMongoConnection();
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    const shippingSetting = await db.collection('settings').findOne({ key: 'shippingInstructions' });
+    const shippingInstructions = shippingSetting?.value || '';
+
+    res.json({
+      success: true,
+      shippingInstructions: shippingInstructions
+    });
+  } catch (error) {
+    console.error('Error fetching public settings:', error);
+    res.status(500).json({ error: 'Failed to fetch settings' });
+  }
+});
+
 // Update setting (admin)
 app.put('/api/settings/:key', async (req, res) => {
   try {
@@ -3116,6 +3137,8 @@ app.put('/api/settings/:key', async (req, res) => {
       description = 'HTML email body template for price quotes';
     } else if (key === 'emailTemplateText') {
       description = 'Plain text email body template for price quotes';
+    } else if (key === 'shippingInstructions') {
+      description = 'Shipping/postal instructions for customers (shown on account page and in emails)';
     } else {
       description = `Setting: ${key}`;
     }
@@ -6148,10 +6171,10 @@ app.post('/api/trade-in/submit', async (req, res) => {
       }
     } else {
       // Single item submission: validate required fields
-      if (!name || !email || !brand || !model || !condition) {
-        return res.status(400).json({ 
-          error: 'Missing required fields' 
-        });
+    if (!name || !email || !brand || !model || !condition) {
+      return res.status(400).json({ 
+        error: 'Missing required fields' 
+      });
       }
     }
 
@@ -6254,7 +6277,7 @@ app.post('/api/trade-in/submit', async (req, res) => {
         console.log(`✅ Marked ${usedQuoteIds.length} quote(s) as used`);
       }
     }
-    
+
     // Create submission
     let submission;
     
@@ -6284,7 +6307,7 @@ app.post('/api/trade-in/submit', async (req, res) => {
       }));
 
       submission = {
-        id: submissionIdCounter++,
+      id: submissionIdCounter++,
         customerId: customerId || null,
         shopifyCustomerId: shopifyCustomerId || null,
         name,
@@ -6317,32 +6340,32 @@ app.post('/api/trade-in/submit', async (req, res) => {
         id: submissionIdCounter++,
         customerId: customerId || null,
         shopifyCustomerId: shopifyCustomerId || null,
-        name,
-        email,
-        phone: phone || '',
-        postcode: postcode || '',
-        notes: notes || '',
-        brand,
-        model,
-        storage: storage || 'Unknown',
-        condition,
-        finalPrice: parseFloat(price),
+      name,
+      email,
+      phone: phone || '',
+      postcode: postcode || '',
+      notes: notes || '',
+      brand,
+      model,
+      storage: storage || 'Unknown',
+      condition,
+      finalPrice: parseFloat(price),
         quoteIds: usedQuoteIds.length > 0 ? usedQuoteIds : null, // Track which quotes were used
-        deviceType: deviceType || 'phone',
-        isCustomDevice: isCustomDevice || false,
-        paymentMethod: selectedPaymentMethod,
-        paymentDetails: paymentDetails || {},
+      deviceType: deviceType || 'phone',
+      isCustomDevice: isCustomDevice || false,
+      paymentMethod: selectedPaymentMethod,
+      paymentDetails: paymentDetails || {},
         confirmations: confirmations || {},
-        pageUrl: pageUrl || '',
+      pageUrl: pageUrl || '',
         status: 'pending',
         paymentStatus: 'pending',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        giftCardCode: null,
-        giftCardId: null,
-        paymentReference: null,
-        paymentDate: null
-      };
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      giftCardCode: null,
+      giftCardId: null,
+      paymentReference: null,
+      paymentDate: null
+    };
     }
 
     tradeInSubmissions.push(submission);
@@ -6381,8 +6404,8 @@ app.post('/api/trade-in/submit', async (req, res) => {
     // Send confirmation email to customer
     try {
       let emailHtml = `
-        <h2>Thank you for your trade-in request!</h2>
-        <p>Hello ${name},</p>
+          <h2>Thank you for your trade-in request!</h2>
+          <p>Hello ${name},</p>
         <p>We've received your trade-in request:</p>
       `;
 
@@ -6408,9 +6431,72 @@ app.post('/api/trade-in/submit', async (req, res) => {
       }
 
       emailHtml += `
-        <p>Our team will review your request and get back to you shortly.</p>
-        <p>Submission ID: #${submission.id}</p>
+          <p>Our team will review your request and get back to you shortly.</p>
+          <p>Submission ID: #${submission.id}</p>
       `;
+
+      // Add shipping instructions to email
+      try {
+        await ensureMongoConnection();
+        if (db) {
+          const shippingSetting = await db.collection('settings').findOne({ key: 'shippingInstructions' });
+          const shippingInstructions = shippingSetting?.value || '';
+          
+          if (shippingInstructions) {
+            emailHtml += `
+              <div style="background: #f5f5f5; border-left: 4px solid #10b981; padding: 20px; margin: 30px 0; border-radius: 8px;">
+                <h3 style="margin-top: 0; color: #10b981;">📦 Where to Post Your Device</h3>
+                <div style="color: #333; line-height: 1.6;">
+                  ${shippingInstructions.replace(/\{\{submissionId\}\}/g, submission.id.toString())}
+                </div>
+              </div>
+            `;
+          } else {
+            // Default shipping instructions if not configured
+            emailHtml += `
+              <div style="background: #f5f5f5; border-left: 4px solid #10b981; padding: 20px; margin: 30px 0; border-radius: 8px;">
+                <h3 style="margin-top: 0; color: #10b981;">📦 Where to Post Your Device</h3>
+                <div style="color: #333; line-height: 1.6;">
+                  <p><strong>Please post your device to:</strong></p>
+                  <p>Tech Corner<br>
+                  [Your Address Here]<br>
+                  [City, Postcode]<br>
+                  United Kingdom</p>
+                  <p><strong>Important:</strong></p>
+                  <ul>
+                    <li>Please use secure packaging to protect your device</li>
+                    <li>Include your submission ID (#${submission.id}) in the package</li>
+                    <li>We recommend using tracked delivery</li>
+                    <li>Please remove your account lock before posting</li>
+                  </ul>
+                </div>
+              </div>
+            `;
+          }
+        }
+      } catch (shippingError) {
+        console.error('Error fetching shipping instructions for email:', shippingError);
+        // Add default instructions if fetch fails
+        emailHtml += `
+          <div style="background: #f5f5f5; border-left: 4px solid #10b981; padding: 20px; margin: 30px 0; border-radius: 8px;">
+            <h3 style="margin-top: 0; color: #10b981;">📦 Where to Post Your Device</h3>
+            <div style="color: #333; line-height: 1.6;">
+              <p><strong>Please post your device to:</strong></p>
+              <p>Tech Corner<br>
+              [Your Address Here]<br>
+              [City, Postcode]<br>
+              United Kingdom</p>
+              <p><strong>Important:</strong></p>
+              <ul>
+                <li>Please use secure packaging to protect your device</li>
+                <li>Include your submission ID (#${submission.id}) in the package</li>
+                <li>We recommend using tracked delivery</li>
+                <li>Please remove your account lock before posting</li>
+              </ul>
+            </div>
+          </div>
+        `;
+      }
 
       await transporter.sendMail({
         from: SMTP_FROM,
@@ -6426,9 +6512,9 @@ app.post('/api/trade-in/submit', async (req, res) => {
     // Send notification email to admin
     try {
       let adminHtml = `
-        <h2>New Trade-In Request</h2>
-        <p><strong>Customer:</strong> ${name} (${email})</p>
-        <p><strong>Phone:</strong> ${phone || 'N/A'}</p>
+          <h2>New Trade-In Request</h2>
+          <p><strong>Customer:</strong> ${name} (${email})</p>
+          <p><strong>Phone:</strong> ${phone || 'N/A'}</p>
       `;
 
       if (isBatchSubmission) {
@@ -6451,8 +6537,8 @@ app.post('/api/trade-in/submit', async (req, res) => {
       }
 
       adminHtml += `
-        <p><strong>Notes:</strong> ${notes || 'None'}</p>
-        <p><strong>Submission ID:</strong> #${submission.id}</p>
+          <p><strong>Notes:</strong> ${notes || 'None'}</p>
+          <p><strong>Submission ID:</strong> #${submission.id}</p>
       `;
 
       await transporter.sendMail({
