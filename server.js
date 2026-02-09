@@ -1504,6 +1504,7 @@ app.get('/api/products/trade-in', async (req, res) => {
       slug: 1,
       sortOrder: 1,
       color: 1,
+      colors: 1, // Include colors array field
       prices: 1
     };
 
@@ -1608,32 +1609,76 @@ app.get('/api/products/trade-in', async (req, res) => {
         }
       }
 
-      // Add variant (one per storage size, with all colors in options)
-      // Use full gid format for both id and gid to ensure consistency
+      // Group variants by storage - collect all colors for each storage size
+      // First, check if a variant for this storage already exists
+      const existingVariantIndex = acc[key].variants.findIndex(v => v.options?.storage === product.storage);
+      
       // Support both new colors array and old single color field
       const productColors = product.colors || (product.color ? [product.color] : []);
       const firstColor = productColors.length > 0 ? productColors[0] : 'default';
-      const variantGid = `gid://database/Variant/${product._id}_${product.storage}_${firstColor}`;
-      const variant = {
-        id: variantGid, // Use full gid format for id as well
-        gid: variantGid,
-        title: product.storage,
-        price: product.prices?.Excellent || product.basePrice || 0, // Use Excellent as base or fallback
-        availableForSale: true,
-        image: {
-          url: product.imageUrl || getDefaultImageUrl(product.deviceType),
-          altText: `${product.brand} ${product.model} ${product.storage}`
-        },
-        options: {
-          storage: product.storage,
-          colors: productColors.length > 0 ? productColors : ['Default'], // Store all colors as array
-          color: firstColor // Keep for backward compatibility
-        },
-        // Store full product data for pricing calculation
-        _productData: product
-      };
+      
+      // Debug logging for colors
+      if (product.brand === 'Apple' && product.model === 'iPhone 17 Pro') {
+        console.log(`🎨 Product colors for ${product.brand} ${product.model} ${product.storage}:`, {
+          colors: product.colors,
+          color: product.color,
+          productColors: productColors,
+          hasColors: !!product.colors,
+          colorsType: typeof product.colors,
+          colorsIsArray: Array.isArray(product.colors)
+        });
+      }
+      
+      if (existingVariantIndex >= 0) {
+        // Variant for this storage already exists - merge colors
+        const existingVariant = acc[key].variants[existingVariantIndex];
+        const existingColors = existingVariant.options?.colors || [];
+        // Merge colors, removing duplicates and filtering out 'Default'
+        const allColors = [...new Set([...existingColors, ...productColors])]
+          .filter(c => c && c !== 'Default' && c !== 'default' && c.trim() !== '');
+        
+        // Update the variant with merged colors
+        existingVariant.options.colors = allColors.length > 0 ? allColors : ['Default'];
+        
+        // Debug logging for color merging
+        if (product.brand === 'Apple' && product.model === 'iPhone 17 Pro') {
+          console.log(`🔄 Merged colors for ${product.storage}:`, {
+            existingColors: existingColors,
+            newColors: productColors,
+            merged: allColors,
+            final: existingVariant.options.colors
+          });
+        }
+        
+        // Store all product data for this storage (for pricing - use the first one's data)
+        // Keep the existing _productData unless this one has better data
+        if (!existingVariant._productData || !existingVariant._productData.prices) {
+          existingVariant._productData = product;
+        }
+      } else {
+        // Create new variant for this storage
+        const variantGid = `gid://database/Variant/${product._id}_${product.storage}_${firstColor}`;
+        const variant = {
+          id: variantGid, // Use full gid format for id as well
+          gid: variantGid,
+          title: product.storage,
+          price: product.prices?.Excellent || product.basePrice || 0, // Use Excellent as base or fallback
+          availableForSale: true,
+          image: {
+            url: product.imageUrl || getDefaultImageUrl(product.deviceType),
+            altText: `${product.brand} ${product.model} ${product.storage}`
+          },
+          options: {
+            storage: product.storage,
+            colors: productColors.length > 0 ? productColors.filter(c => c && c !== 'Default' && c !== 'default' && c.trim() !== '') : ['Default'], // Store all colors as array, filter out Default
+            color: firstColor // Keep for backward compatibility
+          },
+          // Store full product data for pricing calculation
+          _productData: product
+        };
 
-      acc[key].variants.push(variant);
+        acc[key].variants.push(variant);
+      }
 
       return acc;
     }, {});
