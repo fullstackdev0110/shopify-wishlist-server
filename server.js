@@ -7411,7 +7411,7 @@ app.post('/api/trade-in/:id/issue-cash-payment', async (req, res) => {
     }
 
     const id = parseInt(req.params.id);
-    const { paymentMethod } = req.body; // 'bank_transfer' or 'paypal'
+    const { paymentMethod, customerMessage } = req.body; // customerMessage: optional note to customer (e.g. date/time paid)
     const staffIdentifier = req.headers['x-staff-identifier'] || req.body.staffIdentifier || 'Unknown';
     
     // Check permission
@@ -7526,10 +7526,14 @@ app.post('/api/trade-in/:id/issue-cash-payment', async (req, res) => {
     }
 
     // Update submission
+    const paymentDateIso = new Date().toISOString();
     submission.paymentReference = paymentReference;
     submission.paymentStatus = 'processing';
-    submission.paymentDate = new Date().toISOString();
+    submission.paymentDate = paymentDateIso;
     submission.status = 'completed';
+    if (customerMessage && typeof customerMessage === 'string' && customerMessage.trim()) {
+      submission.paymentCustomerMessage = customerMessage.trim();
+    }
     submission.updatedAt = new Date().toISOString();
     submission.lastEditedBy = staffIdentifier;
     
@@ -7571,6 +7575,19 @@ app.post('/api/trade-in/:id/issue-cash-payment', async (req, res) => {
       }]
     });
 
+    // Format payment date for email
+    const paymentDateFormatted = new Date(paymentDateIso).toLocaleString('en-GB', {
+      dateStyle: 'long',
+      timeStyle: 'short',
+      timeZone: 'Europe/London'
+    });
+    const messageBlock = (submission.paymentCustomerMessage || '').trim()
+      ? `<div style="background: #e0f2fe; padding: 16px; border-radius: 8px; margin: 16px 0; border-left: 4px solid #0284c7;">
+            <p style="margin: 0 0 8px 0; font-weight: 600;">Message from us:</p>
+            <p style="margin: 0; white-space: pre-line;">${(submission.paymentCustomerMessage || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>
+          </div>`
+      : '';
+
     // Send payment email to customer
     try {
       let emailSubject = '';
@@ -7585,10 +7602,12 @@ app.post('/api/trade-in/:id/issue-cash-payment', async (req, res) => {
           <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0;">
             <h3 style="margin-top: 0;">Payment Details</h3>
             <p><strong>Amount:</strong> £${submission.finalPrice.toFixed(2)}</p>
+            <p><strong>Payment date:</strong> ${paymentDateFormatted}</p>
             <p><strong>PayPal Email:</strong> ${submission.paymentDetails.paypalEmail}</p>
             <p><strong>Payment Reference:</strong> ${paymentReference}</p>
             <p><strong>Status:</strong> Processing (usually completes within 1-3 business days)</p>
           </div>
+          ${messageBlock}
           <p>You should receive the payment in your PayPal account shortly. Please check your PayPal account for confirmation.</p>
           <p>Thank you for trading in with us!</p>
         `;
@@ -7601,6 +7620,7 @@ app.post('/api/trade-in/:id/issue-cash-payment', async (req, res) => {
           <div style="background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 20px 0;">
             <h3 style="margin-top: 0;">Payment Details</h3>
             <p><strong>Amount:</strong> £${submission.finalPrice.toFixed(2)}</p>
+            <p><strong>Payment date:</strong> ${paymentDateFormatted}</p>
             <p><strong>First Name:</strong> ${submission.paymentDetails.firstName}</p>
             <p><strong>Last Name:</strong> ${submission.paymentDetails.lastName}</p>
             <p><strong>Sort Code:</strong> ${submission.paymentDetails.sortCode}</p>
@@ -7608,6 +7628,7 @@ app.post('/api/trade-in/:id/issue-cash-payment', async (req, res) => {
             <p><strong>Payment Reference:</strong> ${paymentReference}</p>
             <p><strong>Status:</strong> Processing (usually completes within 1-3 business days)</p>
           </div>
+          ${messageBlock}
           <p>The payment will be transferred to your bank account. Please allow 1-3 business days for the transfer to complete.</p>
           <p>Thank you for trading in with us!</p>
         `;
