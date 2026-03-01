@@ -4123,6 +4123,19 @@ app.delete('/api/staff/:id', async (req, res) => {
   }
 });
 
+// Helper to normalise device type strings coming from Excel/CSV
+function normalizeDeviceTypeFromExcel(raw) {
+  const value = (raw || 'phone').toString().toLowerCase().trim();
+
+  if (value.includes('phone')) return 'phone';
+  if (value.includes('tablet')) return 'tablet';
+  if (value.includes('laptop')) return 'laptop';
+  if (value.includes('console') || value.includes('gaming')) return 'gaming';
+  if (value.includes('watch')) return 'watch';
+
+  return value;
+}
+
 // Validate Excel file before import (admin) - returns validation results without importing
 app.post('/api/products/validate-excel', async (req, res) => {
   try {
@@ -4338,7 +4351,21 @@ app.post('/api/products/validate-excel', async (req, res) => {
     // Validation logic
     const errors = [];
     const previewData = [];
-    const storageOptions = ['64GB', '128GB', '256GB', '512GB', '1TB', '2TB'];
+    const storageOptions = [
+      '64GB',
+      '128GB',
+      '256GB',
+      '512GB',
+      '1TB',
+      '2TB',
+      '40mm',
+      '41mm',
+      '42mm',
+      '44mm',
+      '45mm',
+      '46mm',
+      '49mm'
+    ];
     
     // URL validation regex
     const urlRegex = /^(https?:\/\/|www\.)[^\s/$.?#].[^\s]*$/i;
@@ -4351,7 +4378,8 @@ app.post('/api/products/validate-excel', async (req, res) => {
       // Get basic info
       const brand = getColumnValue(row, ['Brand', 'brand', 'Brand Name', 'BRAND', 'BrandName']);
       const model = getColumnValue(row, ['Model', 'model', 'Product Model', 'MODEL', 'ModelName', 'Product']);
-      const deviceType = (getColumnValue(row, ['Device Type', 'deviceType', 'DeviceType', 'Device', 'device', 'DEVICE', 'Type', 'type']) || 'phone').toLowerCase();
+      const deviceTypeRaw = getColumnValue(row, ['Device Type', 'deviceType', 'DeviceType', 'Device', 'device', 'DEVICE', 'Type', 'type']) || 'phone';
+      const deviceType = normalizeDeviceTypeFromExcel(deviceTypeRaw);
       const color = getColumnValue(row, ['Color', 'color', 'Colour', 'colour', 'COLOR']) || null;
       
       // Find image URL column
@@ -4767,8 +4795,23 @@ app.post('/api/products/import-excel', async (req, res) => {
       changes: []
     };
 
-    // Storage capacities to look for
-    const storageOptions = ['64GB', '128GB', '256GB', '512GB', '1TB', '2TB'];
+    // Storage capacities / sizes to look for
+    // Includes standard phone capacities and watch case sizes (mm)
+    const storageOptions = [
+      '64GB',
+      '128GB',
+      '256GB',
+      '512GB',
+      '1TB',
+      '2TB',
+      '40mm',
+      '41mm',
+      '42mm',
+      '44mm',
+      '45mm',
+      '46mm',
+      '49mm'
+    ];
     
     for (let i = 0; i < data.length; i++) {
       const row = data[i];
@@ -4776,7 +4819,8 @@ app.post('/api/products/import-excel', async (req, res) => {
         // Get basic info
         const brand = getColumnValue(row, ['Brand', 'brand', 'Brand Name', 'BRAND', 'BrandName']);
         const model = getColumnValue(row, ['Model', 'model', 'Product Model', 'MODEL', 'ModelName', 'Product']);
-        const deviceType = (getColumnValue(row, ['Device Type', 'deviceType', 'DeviceType', 'Device', 'device', 'DEVICE', 'Type', 'type']) || 'phone').toLowerCase();
+        const deviceTypeRaw = getColumnValue(row, ['Device Type', 'deviceType', 'DeviceType', 'Device', 'device', 'DEVICE', 'Type', 'type']) || 'phone';
+        const deviceType = normalizeDeviceTypeFromExcel(deviceTypeRaw);
         const color = getColumnValue(row, ['Color', 'color', 'Colour', 'colour', 'COLOR']) || null;
         
         // Find image URL column - check all possible variations and positions
