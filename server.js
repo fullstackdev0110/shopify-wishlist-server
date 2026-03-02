@@ -4352,6 +4352,7 @@ app.post('/api/products/validate-excel', async (req, res) => {
     const errors = [];
     const previewData = [];
     const storageOptions = [
+      '32GB',
       '64GB',
       '128GB',
       '256GB',
@@ -4796,8 +4797,9 @@ app.post('/api/products/import-excel', async (req, res) => {
     };
 
     // Storage capacities / sizes to look for
-    // Includes standard phone capacities and watch case sizes (mm)
+    // Includes standard phone/tablet capacities and watch case sizes (mm)
     const storageOptions = [
+      '32GB',
       '64GB',
       '128GB',
       '256GB',
