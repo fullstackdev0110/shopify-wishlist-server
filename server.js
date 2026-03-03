@@ -4129,7 +4129,12 @@ function normalizeDeviceTypeFromExcel(raw) {
 
   if (value.includes('phone')) return 'phone';
   if (value.includes('tablet')) return 'tablet';
-  if (value.includes('laptop')) return 'laptop';
+
+  // Treat common laptop naming (e.g. "Macbook") as laptop
+  if (value.includes('laptop') || value.includes('macbook') || value.includes('notebook')) {
+    return 'laptop';
+  }
+
   if (value.includes('console') || value.includes('gaming')) return 'gaming';
   if (value.includes('watch')) return 'watch';
 
