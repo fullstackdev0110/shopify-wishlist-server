@@ -4362,6 +4362,8 @@ app.post('/api/products/validate-excel', async (req, res) => {
       '128GB',
       '256GB',
       '512GB',
+      '500GB',
+      '825GB',
       '1TB',
       '2TB',
       '40mm',
@@ -4370,6 +4372,7 @@ app.post('/api/products/validate-excel', async (req, res) => {
       '44mm',
       '45mm',
       '46mm',
+      '47mm',
       '49mm'
     ];
     
@@ -4809,6 +4812,8 @@ app.post('/api/products/import-excel', async (req, res) => {
       '128GB',
       '256GB',
       '512GB',
+      '500GB',
+      '825GB',
       '1TB',
       '2TB',
       '40mm',
@@ -4817,6 +4822,7 @@ app.post('/api/products/import-excel', async (req, res) => {
       '44mm',
       '45mm',
       '46mm',
+      '47mm',
       '49mm'
     ];
     
