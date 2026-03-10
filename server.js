@@ -5875,6 +5875,107 @@ app.get('/api/customer/trade-ins/:id', authenticateToken, async (req, res) => {
   }
 });
 
+// Get customer's store credit (gift card) summary
+app.get('/api/customer/store-credit', authenticateToken, async (req, res) => {
+  try {
+    await ensureMongoConnection();
+
+    if (!db) {
+      return res.status(500).json({ error: 'Database connection failed' });
+    }
+
+    const customerId = req.user.customerId;
+
+    // Find all submissions for this customer that have an issued gift card
+    const submissions = await db.collection('submissions')
+      .find({
+        customerId: customerId,
+        giftCardCode: { $exists: true, $ne: null }
+      })
+      .toArray();
+
+    if (!submissions || submissions.length === 0) {
+      return res.json({
+        success: true,
+        totalBalance: 0,
+        currency: 'GBP',
+        giftCards: []
+      });
+    }
+
+    const giftCards = [];
+    let totalBalance = 0;
+
+    // For each gift card code, fetch current balance from Shopify
+    for (const submission of submissions) {
+      const code = submission.giftCardCode;
+      if (!code) continue;
+
+      let currentBalance = null;
+      let initialValue = null;
+      let currency = 'GBP';
+      let status = 'unknown';
+
+      try {
+        const checkResponse = await fetch(`https://${SHOPIFY_SHOP}/admin/api/2024-01/gift_cards.json?code=${encodeURIComponent(code)}`, {
+          method: 'GET',
+          headers: {
+            'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN
+          }
+        });
+
+        if (checkResponse.ok) {
+          const checkData = await checkResponse.json();
+          if (checkData.gift_cards && checkData.gift_cards.length > 0) {
+            const gc = checkData.gift_cards[0];
+            // balance and initial_value are strings, convert safely
+            if (gc.balance != null) {
+              const parsed = parseFloat(gc.balance);
+              if (!Number.isNaN(parsed)) {
+                currentBalance = parsed;
+                totalBalance += parsed;
+              }
+            }
+            if (gc.initial_value != null) {
+              const initParsed = parseFloat(gc.initial_value);
+              if (!Number.isNaN(initParsed)) {
+                initialValue = initParsed;
+              }
+            }
+            if (gc.currency) {
+              currency = gc.currency;
+            }
+            status = gc.disabled ? 'disabled' : (gc.expires_on && new Date(gc.expires_on) < new Date() ? 'expired' : 'active');
+          }
+        } else {
+          console.warn('Failed to fetch gift card from Shopify for balance check:', checkResponse.status);
+        }
+      } catch (error) {
+        console.warn('Error fetching gift card balance from Shopify:', error.message);
+      }
+
+      giftCards.push({
+        code,
+        submissionId: submission.id,
+        status,
+        initialValue: initialValue != null ? initialValue : (submission.finalPrice || null),
+        currentBalance,
+        currency
+      });
+    }
+
+    res.json({
+      success: true,
+      totalBalance,
+      currency: 'GBP',
+      giftCards
+    });
+  } catch (error) {
+    console.error('Error fetching customer store credit summary:', error);
+    res.status(500).json({ error: 'Failed to fetch store credit summary' });
+  }
+});
+
 // Update customer profile
 app.put('/api/customer/profile', authenticateToken, async (req, res) => {
   try {
