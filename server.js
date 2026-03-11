@@ -6365,7 +6365,65 @@ function buildTradeInRequestPdf(submission) {
         doc.font('Helvetica-Bold').text('Notes', 50, y);
         y += lineHeight;
         doc.font('Helvetica').text(submission.notes, 50, y, { width: 495 });
+        y += lineHeight;
       }
+
+      // Payment method section
+      y += 10;
+      doc.font('Helvetica-Bold').text('Payment method', 50, y);
+      y += lineHeight;
+      doc.font('Helvetica');
+      const paymentMethod = submission.paymentMethod || '—';
+      doc.text(`Method: ${paymentMethod}`, 50, y, { width: 495 });
+      y += lineHeight;
+
+      if (submission.paymentDetails && typeof submission.paymentDetails === 'object') {
+        const details = submission.paymentDetails;
+        const detailLines = [];
+
+        if (details.bankName || details.accountName || details.accountNumber || details.sortCode || details.iban) {
+          detailLines.push('Bank transfer details:');
+          if (details.bankName) detailLines.push(`  Bank: ${details.bankName}`);
+          if (details.accountName) detailLines.push(`  Account name: ${details.accountName}`);
+          if (details.accountNumber) detailLines.push(`  Account number: ${details.accountNumber}`);
+          if (details.sortCode) detailLines.push(`  Sort code: ${details.sortCode}`);
+          if (details.iban) detailLines.push(`  IBAN: ${details.iban}`);
+        }
+
+        if (details.paypalEmail) {
+          detailLines.push(`PayPal: ${details.paypalEmail}`);
+        }
+
+        if (details.giftCardEmail || details.giftCardPhone) {
+          detailLines.push('Gift card recipient:');
+          if (details.giftCardEmail) detailLines.push(`  Email: ${details.giftCardEmail}`);
+          if (details.giftCardPhone) detailLines.push(`  Phone: ${details.giftCardPhone}`);
+        }
+
+        if (detailLines.length > 0) {
+          detailLines.forEach((line) => {
+            doc.text(line, 50, y, { width: 495 });
+            y += lineHeight;
+          });
+        }
+      }
+
+      // Tech Corner return address
+      y += 10;
+      doc.font('Helvetica-Bold').text('Send your device to', 50, y);
+      y += lineHeight;
+      doc.font('Helvetica');
+      const addressLines = [
+        'Tech Corner',
+        '20 Benson Road',
+        'Birchwood Shopping Centre',
+        'WA3 7PQ',
+        'United Kingdom',
+      ];
+      addressLines.forEach((line) => {
+        doc.text(line, 50, y, { width: 495 });
+        y += lineHeight;
+      });
 
       doc.end();
     } catch (err) {
