@@ -6317,8 +6317,23 @@ function buildTradeInRequestPdf(submission) {
       const lineHeight = 20;
       let y = 50;
 
-      doc.fontSize(22).font('Helvetica-Bold').text('Trade In Request', 50, y);
-      y += lineHeight + 10;
+      // Try to draw Tech Corner logo at the top
+      (async () => {
+        try {
+          const logoUrl = 'https://cdn.shopify.com/s/files/1/1002/3944/2245/files/Tech_Corner_Logo.png?v=1766866851';
+          const resp = await fetch(logoUrl);
+          if (resp.ok) {
+            const buffer = await resp.buffer();
+            // Draw logo at the very top, keep width reasonable for A4
+            doc.image(buffer, 50, y, { width: 160 });
+            y += 60; // move cursor below logo
+          }
+        } catch (e) {
+          console.warn('Failed to load logo for trade-in PDF header:', e.message);
+        }
+
+        doc.fontSize(22).font('Helvetica-Bold').text('Trade In Request', 50, y);
+        y += lineHeight + 10;
 
       doc.fontSize(12).font('Helvetica');
       doc.text(`Submission ID: #${submission.id}`, 50, y);
@@ -6426,6 +6441,7 @@ function buildTradeInRequestPdf(submission) {
       });
 
       doc.end();
+      })();
     } catch (err) {
       reject(err);
     }
