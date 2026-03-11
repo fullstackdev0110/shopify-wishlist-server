@@ -6320,7 +6320,7 @@ function buildTradeInRequestPdf(submission) {
       // Try to draw Tech Corner logo at the top
       (async () => {
         try {
-          const logoUrl = 'https://cdn.shopify.com/s/files/1/1002/3944/2245/files/Tech_Corner_Logo.png?v=1766866851';
+          const logoUrl = 'https://cdn.shopify.com/s/files/1/1002/3944/2245/files/updated_logo.png?v=1773254114';
           const resp = await fetch(logoUrl);
           if (resp.ok) {
             const buffer = await resp.buffer();
