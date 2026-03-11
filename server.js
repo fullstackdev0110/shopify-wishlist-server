@@ -8,6 +8,7 @@ const path = require('path');
 const XLSX = require('xlsx');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const PDFDocument = require('pdfkit');
 const app = express();
 
 // Backup scheduler
@@ -6302,6 +6303,77 @@ If you have any questions, please don't hesitate to contact us.
   }
 });
 
+// Build A4 PDF for trade-in request (to attach to confirmation email)
+function buildTradeInRequestPdf(submission) {
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ size: 'A4', margin: 50, bufferPages: true });
+      const chunks = [];
+      doc.on('data', (chunk) => chunks.push(chunk));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
+
+      const isBatch = submission.items && submission.items.length > 0;
+      const lineHeight = 20;
+      let y = 50;
+
+      doc.fontSize(22).font('Helvetica-Bold').text('Trade In Request', 50, y);
+      y += lineHeight + 10;
+
+      doc.fontSize(12).font('Helvetica');
+      doc.text(`Submission ID: #${submission.id}`, 50, y);
+      y += lineHeight;
+      doc.text(`Date: ${submission.createdAt ? new Date(submission.createdAt).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' }) : '—'}`, 50, y);
+      y += lineHeight + 10;
+
+      doc.font('Helvetica-Bold').text('Customer details', 50, y);
+      y += lineHeight;
+      doc.font('Helvetica');
+      doc.text(`Name: ${submission.name || '—'}`, 50, y);
+      y += lineHeight;
+      doc.text(`Email: ${submission.email || '—'}`, 50, y);
+      y += lineHeight;
+      doc.text(`Phone: ${submission.phone || '—'}`, 50, y);
+      y += lineHeight;
+      doc.text(`Postcode: ${submission.postcode || '—'}`, 50, y);
+      y += lineHeight + 10;
+
+      doc.font('Helvetica-Bold').text('Device(s)', 50, y);
+      y += lineHeight;
+
+      if (isBatch) {
+        submission.items.forEach((item, index) => {
+          const line = `${index + 1}. ${item.brand || ''} ${item.model || ''} ${item.storage || ''} — ${item.condition || ''} × ${item.quantity || 1} — £${((item.price || 0) * (item.quantity || 1)).toFixed(2)}`;
+          doc.font('Helvetica').text(line, 50, y, { width: 495 });
+          y += lineHeight;
+        });
+        y += 6;
+        doc.font('Helvetica-Bold').text(`Total Estimated Value: £${(submission.finalPrice || 0).toFixed(2)}`, 50, y);
+        y += lineHeight;
+      } else {
+        doc.font('Helvetica');
+        doc.text(`Device: ${submission.brand || ''} ${submission.model || ''} ${submission.storage || ''}`, 50, y);
+        y += lineHeight;
+        doc.text(`Condition: ${submission.condition || '—'}`, 50, y);
+        y += lineHeight;
+        doc.text(`Estimated Value: £${(submission.finalPrice || 0).toFixed(2)}`, 50, y);
+        y += lineHeight;
+      }
+
+      if (submission.notes) {
+        y += 6;
+        doc.font('Helvetica-Bold').text('Notes', 50, y);
+        y += lineHeight;
+        doc.font('Helvetica').text(submission.notes, 50, y, { width: 495 });
+      }
+
+      doc.end();
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
 // Submit trade-in request
 app.post('/api/trade-in/submit', async (req, res) => {
   try {
@@ -6608,6 +6680,7 @@ app.post('/api/trade-in/submit', async (req, res) => {
 
       emailHtml += `
           <p>Our team will review your request and get back to you shortly.</p>
+          <p><strong>Please print and send along with your device the Trade In Request form which is attached to this email.</strong></p>
           <p>Submission ID: #${submission.id}</p>
       `;
 
@@ -6674,11 +6747,24 @@ app.post('/api/trade-in/submit', async (req, res) => {
         `;
       }
 
+      let attachments = [];
+      try {
+        const pdfBuffer = await buildTradeInRequestPdf(submission);
+        attachments.push({
+          filename: 'Trade-In-Request-' + submission.id + '.pdf',
+          content: pdfBuffer,
+          contentType: 'application/pdf'
+        });
+      } catch (pdfErr) {
+        console.error('Error building trade-in PDF attachment:', pdfErr);
+      }
+
       await transporter.sendMail({
         from: SMTP_FROM,
         to: email,
         subject: 'Trade-In Request Received',
-        html: emailHtml
+        html: emailHtml,
+        attachments: attachments.length ? attachments : undefined
       });
     } catch (emailError) {
       console.error('Error sending confirmation email:', emailError);
