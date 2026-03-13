@@ -3205,6 +3205,73 @@ app.put('/api/settings/:key', async (req, res) => {
   }
 });
 
+// Send test email (admin) – uses provided template content or saved settings, with sample data
+app.post('/api/settings/send-test-email', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+
+    const { email, subject: bodySubject, html: bodyHtml, text: bodyText } = req.body;
+    const to = (email || '').toString().trim().toLowerCase();
+    if (!to || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+      return res.status(400).json({ error: 'Valid test email address is required' });
+    }
+
+    await ensureMongoConnection();
+    let subject = (bodySubject || '').trim();
+    let html = (bodyHtml || '').trim();
+    let text = (bodyText || '').trim();
+    if (!subject || !html || !text) {
+      const subjectSetting = db ? (await db.collection('settings').findOne({ key: 'emailTemplateSubject' })) : null;
+      const htmlSetting = db ? (await db.collection('settings').findOne({ key: 'emailTemplateHtml' })) : null;
+      const textSetting = db ? (await db.collection('settings').findOne({ key: 'emailTemplateText' })) : null;
+      subject = subject || (subjectSetting && subjectSetting.value) || 'Trade-in Quote: {{itemName}}';
+      html = html || (htmlSetting && htmlSetting.value) || '';
+      text = text || (textSetting && textSetting.value) || '';
+    }
+
+    const sampleData = {
+      itemName: 'iPhone 15 Pro Max',
+      brand: 'Apple',
+      model: 'iPhone 15 Pro Max',
+      storage: '256GB',
+      condition: 'Excellent',
+      price: '850.00',
+      priceFormatted: '£850.00',
+      quoteExpirationDays: '7',
+      emailUrl: 'https://www.tech-corner.co.uk/pages/sell-your-device'
+    };
+
+    function replaceVars(template, vars) {
+      if (typeof template !== 'string') return template || '';
+      let out = template;
+      Object.keys(vars).forEach(key => {
+        out = out.replace(new RegExp(`{{${key}}}`, 'g'), vars[key]);
+      });
+      return out;
+    }
+
+    const subjectFinal = replaceVars(subject, sampleData);
+    const htmlFinal = replaceVars(html, sampleData);
+    const textFinal = replaceVars(text, sampleData);
+
+    await transporter.sendMail({
+      from: `"Tech Corner" <${SMTP_USER || SMTP_FROM}>`,
+      to: to,
+      subject: subjectFinal,
+      text: textFinal || undefined,
+      html: htmlFinal || undefined
+    });
+
+    res.json({ success: true, message: 'Test email sent successfully' });
+  } catch (error) {
+    console.error('Error sending test email:', error);
+    res.status(500).json({ error: 'Failed to send test email' });
+  }
+});
+
 // ============================================
 // PRICE QUOTES MANAGEMENT
 // ============================================
@@ -9470,3 +9537,4 @@ if (require.main === module) {
   // For serverless (Vercel), initialize scheduler after a delay
   setTimeout(initializeBackupScheduler, 3000);
 }
+
