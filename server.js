@@ -3272,6 +3272,32 @@ app.post('/api/settings/send-test-email', async (req, res) => {
   }
 });
 
+// Send test shipping instructions email (admin)
+app.post('/api/settings/send-test-shipping-email', async (req, res) => {
+  try {
+    const authHeader = req.headers['x-api-key'];
+    if (authHeader !== API_SECRET) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    const { email, html } = req.body;
+    const to = (email || '').toString().trim().toLowerCase();
+    if (!to || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) {
+      return res.status(400).json({ error: 'Valid test email address is required' });
+    }
+    const bodyHtml = (html || '').replace(/\{\{submissionId\}\}/g, 'TEST-123');
+    await transporter.sendMail({
+      from: `"Tech Corner" <${SMTP_USER || SMTP_FROM}>`,
+      to: to,
+      subject: 'Test: Shipping Instructions',
+      html: bodyHtml || '<p>No content.</p>'
+    });
+    res.json({ success: true, message: 'Test email sent successfully' });
+  } catch (error) {
+    console.error('Error sending test shipping email:', error);
+    res.status(500).json({ error: 'Failed to send test email' });
+  }
+});
+
 // ============================================
 // PRICE QUOTES MANAGEMENT
 // ============================================
