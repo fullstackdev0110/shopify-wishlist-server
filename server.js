@@ -8486,7 +8486,7 @@ app.post('/api/backup/create', async (req, res) => {
 
     const { includeShopify = true } = req.body;
     
-    const collectionsToBackup = ['products', 'submissions', 'staff_members', 'audit_logs'];
+    const collectionsToBackup = ['trade_in_products', 'submissions', 'staff_members', 'audit_logs'];
     const backupData = {
       type: backupType,
       createdAt: new Date().toISOString(),
@@ -9131,7 +9131,7 @@ async function performAutoBackup(type = 'incremental') {
 
     console.log(`🔄 Starting auto ${backupType} backup...`);
 
-    const collectionsToBackup = ['products', 'submissions', 'staff_members', 'audit_logs'];
+    const collectionsToBackup = ['trade_in_products', 'submissions', 'staff_members', 'audit_logs'];
     const backupData = {
       type: backupType,
       createdAt: new Date().toISOString(),
