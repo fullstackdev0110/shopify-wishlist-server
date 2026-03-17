@@ -6593,6 +6593,46 @@ app.post('/api/trade-in/submit', async (req, res) => {
       }
     }
 
+    // Validate condition is one of the allowed values (block invalid/unknown conditions)
+    const allowedConditions = ['Excellent', 'Good', 'Fair', 'Faulty'];
+    const normalizeCondition = (c) => (c || '').trim();
+    const isValidCondition = (c) => allowedConditions.some((allowed) => normalizeCondition(c).toLowerCase() === allowed.toLowerCase());
+
+    if (isBatchSubmission) {
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (!isValidCondition(item.condition)) {
+          return res.status(400).json({
+            error: `Invalid condition in item ${i + 1}. Allowed: ${allowedConditions.join(', ')}`,
+            received: normalizeCondition(item.condition) || '(empty)'
+          });
+        }
+        const price = parseFloat(item.price);
+        if (isNaN(price) || price < 0) {
+          return res.status(400).json({
+            error: `Invalid price in item ${i + 1}. Must be a number >= 0`,
+            received: item.price
+          });
+        }
+      }
+    } else {
+      if (!isValidCondition(condition)) {
+        return res.status(400).json({
+          error: `Invalid condition. Allowed: ${allowedConditions.join(', ')}`,
+          received: normalizeCondition(condition) || '(empty)'
+        });
+      }
+      if (!isCustomDevice) {
+        const price = parseFloat(finalPrice);
+        if (isNaN(price) || price < 0) {
+          return res.status(400).json({
+            error: 'Invalid price. Must be a number >= 0',
+            received: finalPrice
+          });
+        }
+      }
+    }
+
     // Validate payment details based on payment method
     const selectedPaymentMethod = paymentMethod || 'store_credit';
     if (selectedPaymentMethod === 'bank_transfer') {
